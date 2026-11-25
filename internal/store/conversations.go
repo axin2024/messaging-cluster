@@ -16,13 +16,14 @@ type Conversation struct {
 	DirectHigh    *uint64   `json:"direct_high,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
 	lastSeq       uint64
+	retainedFrom  uint64
 }
 
-const conversationColumns = "c.id, c.kind, c.title, c.history_policy, c.direct_low, c.direct_high, c.created_at, c.last_seq"
+const conversationColumns = "c.id, c.kind, c.title, c.history_policy, c.direct_low, c.direct_high, c.created_at, c.last_seq, c.retained_from_seq"
 
 func scanConversation(row interface{ Scan(...any) error }) (Conversation, error) {
 	var value Conversation
-	err := row.Scan(&value.ID, &value.Kind, &value.Title, &value.HistoryPolicy, &value.DirectLow, &value.DirectHigh, &value.CreatedAt, &value.lastSeq)
+	err := row.Scan(&value.ID, &value.Kind, &value.Title, &value.HistoryPolicy, &value.DirectLow, &value.DirectHigh, &value.CreatedAt, &value.lastSeq, &value.retainedFrom)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = ErrNotFound
 	}
@@ -99,6 +100,11 @@ func (s *Store) OpenDirect(ctx context.Context, session Session, peer uint64) (C
 	if err != nil {
 		return Conversation{}, err
 	}
+	for _, user := range []uint64{low, high} {
+		if err := upsertInbox(ctx, tx, session.Scope, user, uint64(id), 0); err != nil {
+			return Conversation{}, err
+		}
+	}
 	conversation, err := lockConversation(ctx, tx, session.Scope, uint64(id))
 	if err != nil {
 		return Conversation{}, err
@@ -122,6 +128,9 @@ func (s *Store) CreateGroup(ctx context.Context, session Session, title, history
 		return Conversation{}, err
 	}
 	if err := insertMember(ctx, tx, session.Scope, uint64(id), session.UserID, "owner", 1); err != nil {
+		return Conversation{}, err
+	}
+	if err := upsertInbox(ctx, tx, session.Scope, session.UserID, uint64(id), 0); err != nil {
 		return Conversation{}, err
 	}
 	conversation, err := lockConversation(ctx, tx, session.Scope, uint64(id))

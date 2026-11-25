@@ -53,6 +53,13 @@ func New(storage *store.Store, cluster *gateway.Gateway, logger *slog.Logger) (h
 	routes.HandleFunc("GET /v1/conversations/{id}/messages", s.conversationRoute(s.listMessages))
 	routes.HandleFunc("GET /v1/conversations/{id}/messages/{seq}", s.conversationRoute(s.getMessage))
 	routes.HandleFunc("GET /v1/conversations/{id}/messages/by-client/{client_id}", s.conversationRoute(s.getMessageByClientID))
+	routes.HandleFunc("GET /v1/inbox", s.inbox)
+	routes.HandleFunc("GET /v1/conversations/{id}/sync", s.conversationRoute(s.sync))
+	routes.HandleFunc("PUT /v1/conversations/{id}/sync", s.conversationRoute(s.acknowledgeSync))
+	routes.HandleFunc("GET /v1/conversations/{id}/read", s.conversationRoute(s.readState))
+	routes.HandleFunc("PUT /v1/conversations/{id}/read", s.conversationRoute(s.markRead))
+	routes.HandleFunc("POST /v1/admin/conversations/{id}/retention", s.retentionRoute(s.expireHistory))
+	routes.HandleFunc("GET /v1/admin/conversations/{id}/retention", s.retentionRoute(s.retentionRuns))
 	if cluster != nil {
 		routes.HandleFunc("POST /v1/gateway/tickets", s.gatewayTicket)
 		routes.HandleFunc("GET /v1/gateway", s.upgradeGateway)
@@ -94,6 +101,20 @@ func (s *Server) authSession(w http.ResponseWriter, r *http.Request) (store.Sess
 		return store.Session{}, false
 	}
 	return session, true
+}
+
+func (s *Server) authAdmin(w http.ResponseWriter, r *http.Request) (store.Scope, bool) {
+	digest, valid := bearer(r)
+	if !valid {
+		s.fail(w, r, store.ErrUnauthorized)
+		return store.Scope{}, false
+	}
+	scope, err := s.store.Admin(r.Context(), digest)
+	if err != nil {
+		s.fail(w, r, err)
+		return store.Scope{}, false
+	}
+	return scope, true
 }
 
 func (s *Server) workPassword(w http.ResponseWriter) bool {
@@ -168,6 +189,8 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		problem(w, http.StatusNotFound, "not_found")
 	case errors.Is(err, store.ErrForbidden):
 		problem(w, http.StatusForbidden, "forbidden")
+	case errors.Is(err, store.ErrHistoryExpired):
+		problem(w, http.StatusGone, "history_expired")
 	case errors.Is(err, store.ErrPayloadConflict):
 		problem(w, http.StatusConflict, "client_id_payload_conflict")
 	case errors.Is(err, store.ErrConflict):

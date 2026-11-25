@@ -24,4 +24,4 @@
 
 原设备可用 `GET /v1/conversations/{id}/messages/by-client/{client_id}` 核对未知结果。
 
-`GET /v1/conversations/{id}/messages?after=0&limit=50` 按序号返回可见消息。每次把响应的 `next_after` 保存为本地游标，`has_more` 为真时继续翻页。`GET /v1/conversations/{id}/messages/{seq}` 可读取单条消息。已参与会话的用户请求成员区间外的序号会得到 `403`。
+`GET /v1/conversations/{id}/messages?after=0&limit=50` 按序号返回可见消息。每次把响应的 `next_after` 保存为本地游标，`has_more` 为真时继续翻页。`GET /v1/conversations/{id}/messages/{seq}` 可读取单条消息。已参与会话的用户请求成员区间外的序号会得到 `403`，请求可见但已过期的序号会得到 `410 history_expired`。设备游标和缺口的细节见[离线同步与已读](sync.md)。

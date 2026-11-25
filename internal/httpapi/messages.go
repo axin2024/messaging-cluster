@@ -65,6 +65,10 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, session st
 	if !ok {
 		return
 	}
+	s.syncPage(w, r, session, id, &after)
+}
+
+func (s *Server) syncPage(w http.ResponseWriter, r *http.Request, session store.Session, id uint64, after *uint64) {
 	limit := 50
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		var err error
@@ -74,21 +78,10 @@ func (s *Server) listMessages(w http.ResponseWriter, r *http.Request, session st
 			return
 		}
 	}
-	items, err := s.store.Messages(r.Context(), session, id, after, limit+1)
+	result, err := s.store.Sync(r.Context(), session, id, after, limit)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	more := len(items) > limit
-	if more {
-		items = items[:limit]
-	}
-	if len(items) > 0 {
-		after = items[len(items)-1].Seq
-	}
-	write(w, http.StatusOK, struct {
-		Items     []store.Message `json:"items"`
-		NextAfter uint64          `json:"next_after"`
-		HasMore   bool            `json:"has_more"`
-	}{Items: items, NextAfter: after, HasMore: more})
+	write(w, http.StatusOK, result)
 }

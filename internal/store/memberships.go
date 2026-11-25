@@ -67,10 +67,15 @@ func (s *Store) SetMember(ctx context.Context, session Session, id, user uint64,
 	switch {
 	case errors.Is(err, ErrForbidden):
 		from := uint64(1)
+		high := conversation.lastSeq
 		if conversation.HistoryPolicy == "since_join" {
 			from = conversation.lastSeq + 1
+			high = 0
 		}
 		if err := insertMember(ctx, tx, session.Scope, id, user, role, from); err != nil {
+			return Membership{}, err
+		}
+		if err := upsertInbox(ctx, tx, session.Scope, user, id, high); err != nil {
 			return Membership{}, err
 		}
 	case err != nil:

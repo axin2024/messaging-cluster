@@ -2,7 +2,7 @@
 
 Messaging Cluster 是用 Go 和 MySQL 构建的自托管即时通信服务。项目的首个公开版本包含租户应用、长连接网关、私聊与群组、会话内排序、离线补拉、多端已读、附件治理和运维容量。完整范围见[产品总览](docs/requirements/01-产品总览-prd.md)及[业务功能](docs/requirements/02-业务与交互-prd.md)。
 
-目前本地开发版本可运行租户应用、设备身份 API、WebSocket 网关、私聊、群组和文本消息。消息在会话内按序号持久化，客户端可按游标拉取有权查看的历史。主动通知、保留窗口缺口、附件与容量验收列在后续里程碑中。
+目前本地开发版本可运行租户应用、设备身份 API、WebSocket 网关、私聊、群组和文本消息。离线信箱提供每台设备的同步游标、账号共享的已读位置和过期缺口。主动通知、附件与容量验收列在后续里程碑中。
 
 ## 运行服务
 
@@ -18,4 +18,4 @@ go run ./cmd/messaging serve
 
 用不同的 `MESSAGING_NODE_NAME` 和 `MESSAGING_HTTP_ADDR` 启动第二个进程。两个进程使用同一个 `MESSAGING_MYSQL_DSN`，客户端可连接任一进程。
 
-[身份与设备 API](docs/identity.md) · [长连接网关](docs/gateway.md) · [会话与消息 API](docs/conversations.md) · [Apache License 2.0](LICENSE)
+[身份与设备 API](docs/identity.md) · [长连接网关](docs/gateway.md) · [会话与消息 API](docs/conversations.md) · [离线同步与已读](docs/sync.md) · [Apache License 2.0](LICENSE)

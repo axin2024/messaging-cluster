@@ -16,14 +16,8 @@ type sessionResponse struct {
 }
 
 func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
-	digest, valid := bearer(r)
-	if !valid {
-		s.fail(w, r, store.ErrUnauthorized)
-		return
-	}
-	scope, err := s.store.Admin(r.Context(), digest)
-	if err != nil {
-		s.fail(w, r, err)
+	scope, ok := s.authAdmin(w, r)
+	if !ok {
 		return
 	}
 	var input struct {

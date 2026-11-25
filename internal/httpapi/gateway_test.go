@@ -105,7 +105,12 @@ func TestGatewayHandoffOnMySQL(t *testing.T) {
 	assertGatewayPong(t, desktopSocket)
 }
 
-func gatewayTestServer(t *testing.T, storage *store.Store, name string) *httptest.Server {
+type gatewayFixture struct {
+	*httptest.Server
+	node *gateway.Gateway
+}
+
+func gatewayTestServer(t *testing.T, storage *store.Store, name string) *gatewayFixture {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := gateway.DefaultConfig()
@@ -125,7 +130,7 @@ func gatewayTestServer(t *testing.T, storage *store.Store, name string) *httptes
 	}
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	return server
+	return &gatewayFixture{Server: server, node: node}
 }
 
 func gatewayURL(origin string) string {

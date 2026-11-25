@@ -17,6 +17,7 @@ var (
 	ErrConflict        = errors.New("conflict")
 	ErrLeaseLost       = errors.New("gateway lease lost")
 	ErrPayloadConflict = errors.New("client message ID already has a different payload")
+	ErrHistoryExpired  = errors.New("message history expired")
 )
 
 type Store struct {

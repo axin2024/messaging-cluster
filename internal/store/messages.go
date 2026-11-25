@@ -16,6 +16,7 @@ type Message struct {
 	ClientID       string    `json:"client_id"`
 	Body           string    `json:"body"`
 	CreatedAt      time.Time `json:"created_at"`
+	Expired        bool      `json:"expired,omitempty"`
 }
 
 type MessageReceipt struct {
@@ -23,7 +24,7 @@ type MessageReceipt struct {
 	Duplicate bool    `json:"duplicate"`
 }
 
-const messageColumns = "m.conversation_id, m.seq, m.sender_id, m.client_id, m.body, m.created_at"
+const messageColumns = "m.conversation_id, m.seq, m.sender_id, m.client_id, m.body, m.created_at, m.expired_at IS NOT NULL"
 
 func (s *Store) SendMessage(ctx context.Context, session Session, connection *Connection, id uint64, clientID, body string) (MessageReceipt, error) {
 	tx, err := s.beginConversationWrite(ctx, session)
@@ -73,6 +74,9 @@ func (s *Store) SendMessage(ctx context.Context, session Session, connection *Co
 	if _, err := tx.ExecContext(ctx, `UPDATE conversations SET last_seq = ? WHERE id = ?`, seq, id); err != nil {
 		return MessageReceipt{}, err
 	}
+	if err := advanceInboxForMessage(ctx, tx, session.Scope, id, seq); err != nil {
+		return MessageReceipt{}, err
+	}
 	message, err := scanMessage(tx.QueryRowContext(ctx, `SELECT `+messageColumns+` FROM messages AS m
 		WHERE m.conversation_id = ? AND m.seq = ?`, id, seq), nil)
 	if err != nil {
@@ -110,7 +114,7 @@ func checkMessageConnection(ctx context.Context, tx *sql.Tx, session Session, co
 
 func scanMessage(row interface{ Scan(...any) error }, hash *[]byte) (Message, error) {
 	var message Message
-	fields := []any{&message.ConversationID, &message.Seq, &message.SenderID, &message.ClientID, &message.Body, &message.CreatedAt}
+	fields := []any{&message.ConversationID, &message.Seq, &message.SenderID, &message.ClientID, &message.Body, &message.CreatedAt, &message.Expired}
 	if hash != nil {
 		fields = append(fields, hash)
 	}
@@ -138,13 +142,7 @@ func (s *Store) Message(ctx context.Context, session Session, id, seq uint64) (M
 	if err := messageReader(ctx, tx, session, id); err != nil {
 		return Message{}, err
 	}
-	var found int
-	err = tx.QueryRowContext(ctx, `SELECT 1 FROM memberships WHERE `+membershipScope+`
-		AND from_seq <= ? AND (to_seq IS NULL OR to_seq >= ?) LIMIT 1`, session.TenantID, session.AppID, id, session.UserID, seq, seq).Scan(&found)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Message{}, ErrForbidden
-	}
-	if err != nil {
+	if err := checkVisibleSequence(ctx, tx, session, id, seq); err != nil {
 		return Message{}, err
 	}
 	message, err := scanMessage(tx.QueryRowContext(ctx, `SELECT `+messageColumns+` FROM messages AS m
@@ -155,23 +153,20 @@ func (s *Store) Message(ctx context.Context, session Session, id, seq uint64) (M
 	if err != nil {
 		return Message{}, err
 	}
+	if message.Expired {
+		return Message{}, ErrHistoryExpired
+	}
 	return message, tx.Commit()
 }
 
-func (s *Store) Messages(ctx context.Context, session Session, id, after uint64, limit int) ([]Message, error) {
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	if err := messageReader(ctx, tx, session, id); err != nil {
-		return nil, err
-	}
+const messageVisibleToUser = `EXISTS (SELECT 1 FROM memberships AS member
+	WHERE member.conversation_id = m.conversation_id AND member.tenant_id = m.tenant_id AND member.app_id = m.app_id
+	AND member.user_id = ? AND member.from_seq <= m.seq AND (member.to_seq IS NULL OR member.to_seq >= m.seq))`
+
+func visibleMessages(ctx context.Context, tx *sql.Tx, session Session, id, from uint64, limit int) ([]Message, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT `+messageColumns+` FROM messages AS m
-		WHERE m.conversation_id = ? AND m.seq > ? AND EXISTS (SELECT 1 FROM memberships AS member
-			WHERE member.conversation_id = m.conversation_id AND member.tenant_id = m.tenant_id AND member.app_id = m.app_id
-			AND member.user_id = ? AND member.from_seq <= m.seq AND (member.to_seq IS NULL OR member.to_seq >= m.seq))
-		ORDER BY m.seq LIMIT ?`, id, after, session.UserID, limit)
+		WHERE m.conversation_id = ? AND m.seq >= ? AND `+messageVisibleToUser+` ORDER BY m.seq LIMIT ?`,
+		id, from, session.UserID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -184,8 +179,5 @@ func (s *Store) Messages(ctx context.Context, session Session, id, after uint64,
 		}
 		items = append(items, message)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, tx.Commit()
+	return items, rows.Err()
 }
