@@ -11,10 +11,12 @@ import (
 )
 
 var (
-	ErrUnauthorized = errors.New("unauthorized")
-	ErrNotFound     = errors.New("not found")
-	ErrConflict     = errors.New("conflict")
-	ErrLeaseLost    = errors.New("gateway lease lost")
+	ErrUnauthorized    = errors.New("unauthorized")
+	ErrForbidden       = errors.New("forbidden")
+	ErrNotFound        = errors.New("not found")
+	ErrConflict        = errors.New("conflict")
+	ErrLeaseLost       = errors.New("gateway lease lost")
+	ErrPayloadConflict = errors.New("client message ID already has a different payload")
 )
 
 type Store struct {

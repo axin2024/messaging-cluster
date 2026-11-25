@@ -22,4 +22,6 @@ const socket = new WebSocket(gateway, ["messaging.v1", `ticket.${ticket}`]);
 
 每个网关进程取得独立的 MySQL 节点实例标识和 12 秒租约，每约 4 秒续约。使用同一设备重新接入时，数据库在同一事务中增加连接代数、结束旧连接记录并登记新连接。旧网关随后关闭旧连接。断开操作只影响发起断开的连接代数。同一账号的其他设备有独立代数。
 
-使用当前设备令牌调用 `GET /v1/devices/{id}/presence` 可查看自己的设备是否在线。节点租约过期、设备凭据撤销或失效时，在线状态随数据库记录更新。`GET /v1/devices/{id}/connections` 按代数倒序返回同一设备的连接记录，每页最多 50 条，用 `before` 传入响应中的 `next_before` 继续查询。消息游标和重连补拉在离线同步里程碑中交付。
+使用当前设备令牌调用 `GET /v1/devices/{id}/presence` 可查看自己的设备是否在线。节点租约过期、设备凭据撤销或失效时，在线状态随数据库记录更新。`GET /v1/devices/{id}/connections` 按代数倒序返回同一设备的连接记录，每页最多 50 条，用 `before` 传入响应中的 `next_before` 继续查询。
+
+WebSocket 客户端可发送 `message.send` 帧。服务器在消息事务中检查连接代数，接管后的旧连接无法继续写入。持久回执和历史游标详见[会话与消息 API](conversations.md)。

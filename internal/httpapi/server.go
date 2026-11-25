@@ -42,6 +42,17 @@ func New(storage *store.Store, cluster *gateway.Gateway, logger *slog.Logger) (h
 	routes.HandleFunc("DELETE /v1/devices/{id}", s.revoke)
 	routes.HandleFunc("GET /v1/devices/{id}/presence", s.presence)
 	routes.HandleFunc("GET /v1/devices/{id}/connections", s.connections)
+	routes.HandleFunc("POST /v1/conversations/direct", s.openDirect)
+	routes.HandleFunc("POST /v1/conversations/group", s.createGroup)
+	routes.HandleFunc("GET /v1/conversations", s.listConversations)
+	routes.HandleFunc("GET /v1/conversations/{id}/members", s.conversationRoute(s.listMembers))
+	routes.HandleFunc("PUT /v1/conversations/{id}/members/{user}", s.conversationRoute(s.setMember))
+	routes.HandleFunc("DELETE /v1/conversations/{id}/members/{user}", s.conversationRoute(s.removeMember))
+	routes.HandleFunc("PUT /v1/conversations/{id}/owner", s.conversationRoute(s.transferGroup))
+	routes.HandleFunc("POST /v1/conversations/{id}/messages", s.conversationRoute(s.sendMessage))
+	routes.HandleFunc("GET /v1/conversations/{id}/messages", s.conversationRoute(s.listMessages))
+	routes.HandleFunc("GET /v1/conversations/{id}/messages/{seq}", s.conversationRoute(s.getMessage))
+	routes.HandleFunc("GET /v1/conversations/{id}/messages/by-client/{client_id}", s.conversationRoute(s.getMessageByClientID))
 	if cluster != nil {
 		routes.HandleFunc("POST /v1/gateway/tickets", s.gatewayTicket)
 		routes.HandleFunc("GET /v1/gateway", s.upgradeGateway)
@@ -155,6 +166,10 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		problem(w, http.StatusUnauthorized, "unauthorized")
 	case errors.Is(err, store.ErrNotFound):
 		problem(w, http.StatusNotFound, "not_found")
+	case errors.Is(err, store.ErrForbidden):
+		problem(w, http.StatusForbidden, "forbidden")
+	case errors.Is(err, store.ErrPayloadConflict):
+		problem(w, http.StatusConflict, "client_id_payload_conflict")
 	case errors.Is(err, store.ErrConflict):
 		problem(w, http.StatusConflict, "already_exists")
 	default:

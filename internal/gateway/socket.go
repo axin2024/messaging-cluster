@@ -9,6 +9,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
+	"github.com/axin2024/messaging-cluster/internal/credential"
 	"github.com/axin2024/messaging-cluster/internal/store"
 )
 
@@ -24,7 +25,7 @@ func (g *Gateway) Serve(w http.ResponseWriter, r *http.Request, session store.Se
 		return
 	}
 	defer socket.CloseNow()
-	socket.SetReadLimit(4096)
+	socket.SetReadLimit(32 << 10)
 
 	ctx, cancel := context.WithCancelCause(context.WithoutCancel(r.Context()))
 	defer cancel(nil)
@@ -71,7 +72,7 @@ func (g *Gateway) Serve(w http.ResponseWriter, r *http.Request, session store.Se
 		defer close(pingDone)
 		g.ping(ctx, cancel, socket)
 	}()
-	reason = g.receive(ctx, socket)
+	reason = g.receive(ctx, socket, session, connection)
 	cancel(nil)
 	<-pingDone
 }
@@ -95,26 +96,63 @@ func (g *Gateway) ping(ctx context.Context, cancel context.CancelCauseFunc, sock
 	}
 }
 
-func (g *Gateway) receive(ctx context.Context, socket *websocket.Conn) string {
+func (g *Gateway) receive(ctx context.Context, socket *websocket.Conn, session store.Session, connection store.Connection) string {
 	for {
 		var request struct {
-			Type      string `json:"type"`
-			RequestID string `json:"request_id,omitempty"`
+			Type           string `json:"type"`
+			RequestID      string `json:"request_id,omitempty"`
+			ConversationID uint64 `json:"conversation_id,omitempty"`
+			ClientID       string `json:"client_id,omitempty"`
+			Body           string `json:"body,omitempty"`
 		}
 		if err := wsjson.Read(ctx, socket, &request); err != nil {
 			return readCloseReason(ctx, err)
 		}
 		response := struct {
-			Type      string `json:"type"`
-			RequestID string `json:"request_id,omitempty"`
-			Error     string `json:"error,omitempty"`
-		}{Type: "pong", RequestID: request.RequestID}
-		if request.Type != "ping" {
+			Type      string                `json:"type"`
+			RequestID string                `json:"request_id,omitempty"`
+			Error     string                `json:"error,omitempty"`
+			Receipt   *store.MessageReceipt `json:"receipt,omitempty"`
+		}{RequestID: request.RequestID}
+		switch request.Type {
+		case "ping":
+			response.Type = "pong"
+		case "message.send":
+			if request.ConversationID == 0 || !credential.ValidMessage(request.ClientID, request.Body) {
+				response.Type, response.Error = "error", "invalid_message"
+				break
+			}
+			operation, cancel := context.WithTimeout(ctx, 3*time.Second)
+			receipt, err := g.store.SendMessage(operation, session, &connection, request.ConversationID, request.ClientID, request.Body)
+			cancel()
+			if errors.Is(err, store.ErrUnauthorized) {
+				return "authority_ended"
+			}
+			if err != nil {
+				response.Type, response.Error = "error", g.messageError(err, connection)
+				break
+			}
+			response.Type, response.Receipt = "message.accepted", &receipt
+		default:
 			response.Type, response.Error = "error", "invalid_frame_type"
 		}
 		if err := send(ctx, socket, response); err != nil {
 			return readCloseReason(ctx, err)
 		}
+	}
+}
+
+func (g *Gateway) messageError(err error, connection store.Connection) string {
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return "not_found"
+	case errors.Is(err, store.ErrForbidden):
+		return "forbidden"
+	case errors.Is(err, store.ErrPayloadConflict):
+		return "client_id_payload_conflict"
+	default:
+		g.logger.Warn("could not confirm message", "node", connection.Node.ID, "device", connection.DeviceID, "error", err)
+		return "message_unconfirmed"
 	}
 }
 
