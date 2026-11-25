@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -41,7 +42,7 @@ func (g *Gateway) Serve(w http.ResponseWriter, r *http.Request, session store.Se
 		}
 		return
 	}
-	client := &peer{connection: connection, cancel: cancel}
+	client := &peer{connection: connection, cancel: cancel, delivery: newDeliveryWindow()}
 	reason := "transport_error"
 	defer func() {
 		_ = socket.CloseNow()
@@ -67,14 +68,19 @@ func (g *Gateway) Serve(w http.ResponseWriter, r *http.Request, session store.Se
 		return
 	}
 
-	pingDone := make(chan struct{})
+	var watchers sync.WaitGroup
+	watchers.Add(2)
 	go func() {
-		defer close(pingDone)
+		defer watchers.Done()
 		g.ping(ctx, cancel, socket)
 	}()
-	reason = g.receive(ctx, socket, session, connection)
+	go func() {
+		defer watchers.Done()
+		g.notify(ctx, socket, client)
+	}()
+	reason = g.receive(ctx, socket, session, client)
 	cancel(nil)
-	<-pingDone
+	watchers.Wait()
 }
 
 func (g *Gateway) ping(ctx context.Context, cancel context.CancelCauseFunc, socket *websocket.Conn) {
@@ -96,12 +102,14 @@ func (g *Gateway) ping(ctx context.Context, cancel context.CancelCauseFunc, sock
 	}
 }
 
-func (g *Gateway) receive(ctx context.Context, socket *websocket.Conn, session store.Session, connection store.Connection) string {
+func (g *Gateway) receive(ctx context.Context, socket *websocket.Conn, session store.Session, client *peer) string {
+	connection := client.connection
 	for {
 		var request struct {
 			Type           string `json:"type"`
 			RequestID      string `json:"request_id,omitempty"`
 			ConversationID uint64 `json:"conversation_id,omitempty"`
+			DeliveryID     uint64 `json:"delivery_id,omitempty"`
 			store.OutgoingMessage
 		}
 		if err := wsjson.Read(ctx, socket, &request); err != nil {
@@ -116,6 +124,18 @@ func (g *Gateway) receive(ctx context.Context, socket *websocket.Conn, session s
 		switch request.Type {
 		case "ping":
 			response.Type = "pong"
+		case "notification.ack":
+			if !client.delivery.canAck(request.DeliveryID) {
+				continue
+			}
+			operation, cancel := context.WithTimeout(ctx, time.Second)
+			err := g.store.AcknowledgeDelivery(operation, connection, request.DeliveryID)
+			cancel()
+			if err == nil {
+				client.delivery.ack(request.DeliveryID)
+				continue
+			}
+			response.Type, response.Error = "error", "notification_unconfirmed"
 		case "message.send":
 			if request.ConversationID == 0 || !credential.ValidMessage(request.ClientID, request.Body, request.AttachmentIDs) {
 				response.Type, response.Error = "error", "invalid_message"
@@ -151,6 +171,8 @@ func (g *Gateway) messageError(err error, connection store.Connection) string {
 		return "client_id_payload_conflict"
 	case errors.Is(err, store.ErrInvalidAttachment):
 		return "attachment_unavailable"
+	case errors.Is(err, store.ErrRateLimited):
+		return "tenant_rate_limited"
 	default:
 		g.logger.Warn("could not confirm message", "node", connection.Node.ID, "device", connection.DeviceID, "error", err)
 		return "message_unconfirmed"
@@ -187,6 +209,8 @@ func closeReason(err error) string {
 		return "node_shutdown"
 	case errHeartbeat:
 		return "heartbeat_timeout"
+	case errSlow:
+		return "notification_backpressure"
 	default:
 		return "transport_error"
 	}

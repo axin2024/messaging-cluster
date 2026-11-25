@@ -14,27 +14,29 @@ import (
 const Protocol = "messaging.v1"
 
 type Config struct {
-	Lease          time.Duration
-	Reconcile      time.Duration
-	PingInterval   time.Duration
-	PingTimeout    time.Duration
-	MaxConnections int
+	Lease            time.Duration
+	Reconcile        time.Duration
+	PingInterval     time.Duration
+	PingTimeout      time.Duration
+	MaxConnections   int
+	DeliveryInterval time.Duration
 }
 
 func DefaultConfig() Config {
 	return Config{Lease: 12 * time.Second, Reconcile: 500 * time.Millisecond,
-		PingInterval: 15 * time.Second, PingTimeout: 5 * time.Second, MaxConnections: 4096}
+		PingInterval: 15 * time.Second, PingTimeout: 5 * time.Second, MaxConnections: 4096, DeliveryInterval: 50 * time.Millisecond}
 }
 
 type Gateway struct {
-	store  *store.Store
-	node   store.Node
-	config Config
-	logger *slog.Logger
-	cancel context.CancelFunc
-	done   chan struct{}
-	ready  atomic.Bool
-	err    error // read only after done closes
+	store        *store.Store
+	node         store.Node
+	config       Config
+	logger       *slog.Logger
+	cancel       context.CancelFunc
+	done         chan struct{}
+	deliveryDone chan struct{}
+	ready        atomic.Bool
+	err          error // read only after done closes
 
 	mu       sync.Mutex
 	stopping bool
@@ -46,6 +48,7 @@ type Gateway struct {
 type peer struct {
 	connection store.Connection
 	cancel     context.CancelCauseFunc
+	delivery   *deliveryWindow
 }
 
 var (
@@ -53,11 +56,12 @@ var (
 	errInvalid    = errors.New("connection authority ended")
 	errShutdown   = errors.New("gateway stopping")
 	errHeartbeat  = errors.New("heartbeat timed out")
+	errSlow       = errors.New("notification write timed out")
 )
 
 func Start(ctx context.Context, storage *store.Store, name string, config Config, logger *slog.Logger) (*Gateway, error) {
 	if config.Reconcile <= 0 || config.Lease < 6*config.Reconcile || config.PingInterval <= 0 ||
-		config.PingTimeout <= 0 || config.MaxConnections <= 0 {
+		config.PingTimeout <= 0 || config.MaxConnections <= 0 || config.DeliveryInterval <= 0 {
 		return nil, errors.New("invalid gateway timing or connection limit")
 	}
 	start, cancelStart := context.WithTimeout(ctx, 5*time.Second)
@@ -68,8 +72,9 @@ func Start(ctx context.Context, storage *store.Store, name string, config Config
 	}
 	lifetime, cancel := context.WithCancel(ctx)
 	g := &Gateway{store: storage, node: node, config: config, logger: logger, cancel: cancel,
-		done: make(chan struct{}), peers: make(map[uint64]*peer)}
+		done: make(chan struct{}), deliveryDone: make(chan struct{}), peers: make(map[uint64]*peer)}
 	g.ready.Store(true)
+	go g.deliver(lifetime)
 	go g.maintain(lifetime)
 	return g, nil
 }
@@ -88,6 +93,7 @@ func (g *Gateway) maintain(ctx context.Context) {
 	defer ticker.Stop()
 	defer func() {
 		g.ready.Store(false)
+		g.cancel()
 		g.mu.Lock()
 		g.stopping = true
 		for _, client := range g.peers {
@@ -99,6 +105,7 @@ func (g *Gateway) maintain(ctx context.Context) {
 			g.logger.Warn("could not record gateway stop", "node", g.node.ID, "error", err)
 		}
 		cancel()
+		<-g.deliveryDone
 		g.wait.Wait()
 		close(g.done)
 	}()
@@ -154,6 +161,9 @@ func (g *Gateway) maintain(ctx context.Context) {
 			}
 			if err := g.store.PruneAttachmentGrants(prune); err != nil && ctx.Err() == nil {
 				g.logger.Warn("could not prune attachment passes", "node", g.node.ID, "error", err)
+			}
+			if err := g.store.PruneSendBuckets(prune); err != nil && ctx.Err() == nil {
+				g.logger.Warn("could not prune message rate counters", "node", g.node.ID, "error", err)
 			}
 			cancel()
 			nextPrune = time.Now().Add(time.Minute)

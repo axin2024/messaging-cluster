@@ -87,7 +87,7 @@ func (s *Server) markRead(w http.ResponseWriter, r *http.Request, session store.
 	s.readState(w, r, session, id)
 }
 
-func (s *Server) retentionRoute(handler func(http.ResponseWriter, *http.Request, store.Scope, uint64)) http.HandlerFunc {
+func (s *Server) adminConversationRoute(handler func(http.ResponseWriter, *http.Request, store.Scope, uint64)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		scope, ok := s.authAdmin(w, r)
 		if !ok {

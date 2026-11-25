@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -29,7 +30,7 @@ func main() {
 
 func run(args []string, logger *slog.Logger) error {
 	if len(args) == 0 || (len(args) == 1 && (args[0] == "-h" || args[0] == "--help")) {
-		fmt.Fprintln(os.Stdout, "Usage: messaging migrate | create-app TENANT APP | serve")
+		fmt.Fprintln(os.Stdout, "Usage: messaging migrate | create-app TENANT APP | set-tenant-rate TENANT PER_SECOND | serve")
 		return nil
 	}
 	dsn := os.Getenv("MESSAGING_MYSQL_DSN")
@@ -48,6 +49,15 @@ func run(args []string, logger *slog.Logger) error {
 			return errors.New("usage: messaging create-app TENANT APP with lowercase app and tenant keys")
 		}
 		return createApp(dsn, args[1], args[2])
+	case "set-tenant-rate":
+		if len(args) != 3 || !credential.ValidKey(args[1]) {
+			return errors.New("usage: messaging set-tenant-rate TENANT PER_SECOND")
+		}
+		rate, err := strconv.Atoi(args[2])
+		if err != nil || rate < 1 || rate > 10000 {
+			return errors.New("limit must be between 1 and 10000 messages per second")
+		}
+		return setTenantRate(dsn, args[1], rate)
 	case "serve":
 		if len(args) != 1 {
 			return errors.New("usage: messaging serve")
@@ -56,6 +66,23 @@ func run(args []string, logger *slog.Logger) error {
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+func setTenantRate(dsn, tenant string, limit int) error {
+	storage, err := store.Open(dsn)
+	if err != nil {
+		return err
+	}
+	defer storage.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := storage.Ready(ctx); err != nil {
+		return err
+	}
+	if err := storage.SetTenantSendLimit(ctx, tenant, limit); err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"tenant": tenant, "messages_per_second": limit})
 }
 
 func createApp(dsn, tenantKey, appKey string) error {

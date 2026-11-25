@@ -68,8 +68,10 @@ func New(storage *store.Store, cluster *gateway.Gateway, blobs media.Blobs, logg
 	routes.HandleFunc("PUT /v1/conversations/{id}/sync", s.conversationRoute(s.acknowledgeSync))
 	routes.HandleFunc("GET /v1/conversations/{id}/read", s.conversationRoute(s.readState))
 	routes.HandleFunc("PUT /v1/conversations/{id}/read", s.conversationRoute(s.markRead))
-	routes.HandleFunc("POST /v1/admin/conversations/{id}/retention", s.retentionRoute(s.expireHistory))
-	routes.HandleFunc("GET /v1/admin/conversations/{id}/retention", s.retentionRoute(s.retentionRuns))
+	routes.HandleFunc("POST /v1/admin/conversations/{id}/retention", s.adminConversationRoute(s.expireHistory))
+	routes.HandleFunc("GET /v1/admin/conversations/{id}/retention", s.adminConversationRoute(s.retentionRuns))
+	routes.HandleFunc("GET /v1/admin/diagnostics", s.diagnostics)
+	routes.HandleFunc("GET /v1/admin/conversations/{id}/messages/{seq}/delivery", s.adminConversationRoute(s.messageDelivery))
 	if cluster != nil {
 		routes.HandleFunc("POST /v1/gateway/tickets", s.gatewayTicket)
 		routes.HandleFunc("GET /v1/gateway", s.upgradeGateway)
@@ -203,6 +205,9 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		problem(w, http.StatusGone, "history_expired")
 	case errors.Is(err, store.ErrInvalidAttachment):
 		problem(w, http.StatusUnprocessableEntity, "attachment_unavailable")
+	case errors.Is(err, store.ErrRateLimited):
+		w.Header().Set("Retry-After", "1")
+		problem(w, http.StatusTooManyRequests, "tenant_rate_limited")
 	case errors.Is(err, store.ErrPayloadConflict):
 		problem(w, http.StatusConflict, "client_id_payload_conflict")
 	case errors.Is(err, store.ErrConflict):

@@ -60,6 +60,10 @@ func (s *Store) setPosition(ctx context.Context, session Session, id, seq uint64
 	if shared {
 		_, err = tx.ExecContext(ctx, `INSERT INTO read_state (tenant_id, app_id, user_id, conversation_id, seq)
 			VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE seq = ?`, session.TenantID, session.AppID, session.UserID, id, seq, seq)
+		if err == nil {
+			_, err = tx.ExecContext(ctx, `INSERT INTO message_outbox (conversation_id, seq, kind, recipient_user_id, origin_device_id)
+				VALUES (?, ?, 'read', ?, ?)`, id, seq, session.UserID, session.DeviceID)
+		}
 	} else {
 		_, err = tx.ExecContext(ctx, `INSERT INTO sync_cursors (tenant_id, app_id, device_id, conversation_id, seq)
 			VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE seq = ?`, session.TenantID, session.AppID, session.DeviceID, id, seq, seq)

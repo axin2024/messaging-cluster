@@ -25,3 +25,18 @@ const socket = new WebSocket(gateway, ["messaging.v1", `ticket.${ticket}`]);
 使用当前设备令牌调用 `GET /v1/devices/{id}/presence` 可查看自己的设备是否在线。节点租约过期、设备凭据撤销或失效时，在线状态随数据库记录更新。`GET /v1/devices/{id}/connections` 按代数倒序返回同一设备的连接记录，每页最多 50 条，用 `before` 传入响应中的 `next_before` 继续查询。
 
 WebSocket 客户端可发送 `message.send` 帧。服务器在消息事务中检查连接代数，接管后的旧连接无法继续写入。持久回执和历史游标详见[会话与消息 API](conversations.md)。
+
+## 实时通知
+
+`ready` 之后，服务器可异步发送下列事件。客户端按 `type` 分派，用 `request_id` 匹配 `message.accepted`、`pong` 和错误回执。
+
+| 事件 | 客户端操作 |
+|---|---|
+| `notification.message` | 从已持久保存的设备游标拉取对应会话的新消息。 |
+| `notification.read` | 重新读取对应会话的共享已读位置。 |
+| `notification.retraction` | 拉取撤回记录，更新本地对应消息。 |
+| `notification.resync_required` | 用信箱、会话同步和撤回记录补齐积压。重连后继续接收通知。 |
+
+前三种事件带有 `delivery_id`、`conversation_id` 和 `seq`。收到后发送 `{"type":"notification.ack","delivery_id":123}`，成功时服务器继续处理后续帧。返回 `notification_unconfirmed` 时可以在当前连接上重试确认。业务游标仍需通过 `PUT /v1/conversations/{id}/sync` 更新，客户端按会话 ID 和序号合并拉取结果。
+
+每条连接最多保留 16 条未确认提示。继续写入会使该连接收到一次 `notification.resync_required`，其余会话连接仍能收件。客户端新接入或重连后先读取信箱，拉取 MySQL 中已提交而本地尚未应用的记录。通知可以合并处理，展示顺序使用会话内序号。[离线同步与已读](sync.md)

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -173,8 +174,17 @@ func assertSocketClosed(t *testing.T, socket *websocket.Conn) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
-	if _, _, err := socket.Read(ctx); err == nil || ctx.Err() != nil {
-		t.Fatalf("socket did not close before test deadline: %v", err)
+	for {
+		var frame struct{ Type string }
+		if err := wsjson.Read(ctx, socket, &frame); err != nil {
+			if ctx.Err() != nil {
+				t.Fatalf("socket did not close before test deadline: %v", err)
+			}
+			return
+		}
+		if !strings.HasPrefix(frame.Type, "notification.") {
+			t.Fatalf("unexpected frame while waiting for close: %+v", frame)
+		}
 	}
 }
 
@@ -186,7 +196,30 @@ func assertGatewayPong(t *testing.T, socket *websocket.Conn) {
 		t.Fatal(err)
 	}
 	var pong map[string]string
-	if err := wsjson.Read(ctx, socket, &pong); err != nil || pong["type"] != "pong" || pong["request_id"] != "health" {
+	if err := readGatewayReply(ctx, socket, "health", &pong); err != nil || pong["type"] != "pong" || pong["request_id"] != "health" {
 		t.Fatalf("unexpected gateway heartbeat: %v, error %v", pong, err)
+	}
+}
+
+func readGatewayReply(ctx context.Context, socket *websocket.Conn, requestID string, result any) error {
+	for {
+		_, data, err := socket.Read(ctx)
+		if err != nil {
+			return err
+		}
+		var envelope struct {
+			Type      string `json:"type"`
+			RequestID string `json:"request_id"`
+		}
+		if err := json.Unmarshal(data, &envelope); err != nil {
+			return err
+		}
+		if strings.HasPrefix(envelope.Type, "notification.") {
+			continue
+		}
+		if envelope.RequestID != requestID {
+			return fmt.Errorf("unexpected gateway reply: %s, request ID %q", envelope.Type, envelope.RequestID)
+		}
+		return json.Unmarshal(data, result)
 	}
 }

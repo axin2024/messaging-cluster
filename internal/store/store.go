@@ -19,6 +19,7 @@ var (
 	ErrPayloadConflict   = errors.New("client message ID already has a different payload")
 	ErrHistoryExpired    = errors.New("message history expired")
 	ErrInvalidAttachment = errors.New("attachment is unavailable for sending")
+	ErrRateLimited       = errors.New("tenant message rate exceeded")
 )
 
 type Store struct {

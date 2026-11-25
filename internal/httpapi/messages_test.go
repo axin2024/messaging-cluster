@@ -106,7 +106,7 @@ func TestConversationsAndDurableMessagesOnMySQL(t *testing.T) {
 		Error     string               `json:"error"`
 		Receipt   store.MessageReceipt `json:"receipt"`
 	}
-	if err := wsjson.Read(ctx, socket, &accepted); err != nil || accepted.Type != "message.accepted" ||
+	if err := readGatewayReply(ctx, socket, "ws-2", &accepted); err != nil || accepted.Type != "message.accepted" ||
 		accepted.RequestID != "ws-2" || accepted.Receipt.Message.Seq != 2 || accepted.Receipt.Duplicate {
 		t.Fatalf("unexpected delivery receipt: %+v, %v", accepted, err)
 	}
@@ -268,7 +268,7 @@ func assertMessageOutbox(t *testing.T, dsn string, conversation uint64, count in
 	defer db.Close()
 	var stored, planned int
 	err = db.QueryRowContext(t.Context(), `SELECT COUNT(*), COUNT(o.id) FROM messages AS m
-		LEFT JOIN message_outbox AS o ON o.conversation_id = m.conversation_id AND o.seq = m.seq
+		LEFT JOIN message_outbox AS o ON o.conversation_id = m.conversation_id AND o.seq = m.seq AND o.kind = 'message'
 		WHERE m.conversation_id = ?`, conversation).Scan(&stored, &planned)
 	if err != nil || stored != count || planned != count {
 		t.Fatalf("message/outbox row count: %d/%d, expected %d + %d, error %v", stored, planned, count, count, err)

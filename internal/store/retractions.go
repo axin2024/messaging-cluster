@@ -57,6 +57,10 @@ func (s *Store) Retract(ctx context.Context, session Session, id, seq uint64) (R
 			SET m.retracted_at = r.retracted_at, m.body = '' WHERE m.conversation_id = ? AND m.seq = ?`, id, seq); err != nil {
 			return Retraction{}, err
 		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO message_outbox (conversation_id, seq, kind, origin_device_id)
+			VALUES (?, ?, 'retraction', ?)`, id, seq, session.DeviceID); err != nil {
+			return Retraction{}, err
+		}
 	}
 	record, err := scanRetraction(tx.QueryRowContext(ctx, `SELECT id, conversation_id, seq, actor_id, retracted_at
 		FROM message_retractions WHERE conversation_id = ? AND seq = ?`, id, seq))
