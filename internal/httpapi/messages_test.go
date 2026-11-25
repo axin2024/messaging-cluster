@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -115,15 +116,15 @@ func TestConversationsAndDurableMessagesOnMySQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := storage.SendMessage(ctx, currentSession, &oldConnection, group.ID, "stale", "旧连接"); !errors.Is(err, store.ErrUnauthorized) {
+	if _, err := storage.SendMessage(ctx, currentSession, &oldConnection, group.ID, store.OutgoingMessage{ClientID: "stale", Body: "旧连接"}); !errors.Is(err, store.ErrUnauthorized) {
 		t.Fatalf("stale connection could write: %v", err)
 	}
-	if got, err := storage.SendMessage(ctx, currentSession, &currentConnection, group.ID, "bridge-update", "桥吊已经就位"); err != nil || !got.Duplicate {
+	if got, err := storage.SendMessage(ctx, currentSession, &currentConnection, group.ID, store.OutgoingMessage{ClientID: "bridge-update", Body: "桥吊已经就位"}); err != nil || !got.Duplicate {
 		t.Fatalf("current connection could not replay: %+v, %v", got, err)
 	}
 	var receipt store.MessageReceipt
 	f.check(t, "POST", messages, owner.Token, payload("bridge-update", "桥吊已经就位"), http.StatusOK, &receipt)
-	if receipt.Message != accepted.Receipt.Message || !receipt.Duplicate {
+	if !reflect.DeepEqual(receipt.Message, accepted.Receipt.Message) || !receipt.Duplicate {
 		t.Fatalf("replayed receipt differs: %+v and %+v", accepted.Receipt, receipt)
 	}
 	f.check(t, "POST", messages, owner.Token, payload("bridge-update", "争抢原消息"), http.StatusConflict, nil)
@@ -132,7 +133,7 @@ func TestConversationsAndDurableMessagesOnMySQL(t *testing.T) {
 	f.check(t, "GET", messages+"/by-client/bridge-update", phone.Token, nil, http.StatusNotFound, nil)
 	var byClient store.Message
 	f.check(t, "GET", messages+"/by-client/bridge-update", owner.Token, nil, http.StatusOK, &byClient)
-	if byClient != receipt.Message {
+	if !reflect.DeepEqual(byClient, receipt.Message) {
 		t.Fatalf("client ID readback differs: %+v and %+v", byClient, receipt.Message)
 	}
 	f.check(t, "POST", messages, manager.Token, payload("bridge-update", "不同发送人"), http.StatusCreated, nil)

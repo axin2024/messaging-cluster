@@ -102,8 +102,7 @@ func (g *Gateway) receive(ctx context.Context, socket *websocket.Conn, session s
 			Type           string `json:"type"`
 			RequestID      string `json:"request_id,omitempty"`
 			ConversationID uint64 `json:"conversation_id,omitempty"`
-			ClientID       string `json:"client_id,omitempty"`
-			Body           string `json:"body,omitempty"`
+			store.OutgoingMessage
 		}
 		if err := wsjson.Read(ctx, socket, &request); err != nil {
 			return readCloseReason(ctx, err)
@@ -118,12 +117,12 @@ func (g *Gateway) receive(ctx context.Context, socket *websocket.Conn, session s
 		case "ping":
 			response.Type = "pong"
 		case "message.send":
-			if request.ConversationID == 0 || !credential.ValidMessage(request.ClientID, request.Body) {
+			if request.ConversationID == 0 || !credential.ValidMessage(request.ClientID, request.Body, request.AttachmentIDs) {
 				response.Type, response.Error = "error", "invalid_message"
 				break
 			}
 			operation, cancel := context.WithTimeout(ctx, 3*time.Second)
-			receipt, err := g.store.SendMessage(operation, session, &connection, request.ConversationID, request.ClientID, request.Body)
+			receipt, err := g.store.SendMessage(operation, session, &connection, request.ConversationID, request.OutgoingMessage)
 			cancel()
 			if errors.Is(err, store.ErrUnauthorized) {
 				return "authority_ended"
@@ -150,6 +149,8 @@ func (g *Gateway) messageError(err error, connection store.Connection) string {
 		return "forbidden"
 	case errors.Is(err, store.ErrPayloadConflict):
 		return "client_id_payload_conflict"
+	case errors.Is(err, store.ErrInvalidAttachment):
+		return "attachment_unavailable"
 	default:
 		g.logger.Warn("could not confirm message", "node", connection.Node.ID, "device", connection.DeviceID, "error", err)
 		return "message_unconfirmed"

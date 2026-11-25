@@ -17,6 +17,7 @@ import (
 
 	"github.com/axin2024/messaging-cluster/internal/credential"
 	"github.com/axin2024/messaging-cluster/internal/gateway"
+	"github.com/axin2024/messaging-cluster/internal/media"
 	"github.com/axin2024/messaging-cluster/internal/store"
 )
 
@@ -112,6 +113,11 @@ type gatewayFixture struct {
 
 func gatewayTestServer(t *testing.T, storage *store.Store, name string) *gatewayFixture {
 	t.Helper()
+	return gatewayTestServerWithMedia(t, storage, name, nil)
+}
+
+func gatewayTestServerWithMedia(t *testing.T, storage *store.Store, name string, blobs media.Blobs) *gatewayFixture {
+	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := gateway.DefaultConfig()
 	config.Reconcile = 40 * time.Millisecond
@@ -124,7 +130,7 @@ func gatewayTestServer(t *testing.T, storage *store.Store, name string) *gateway
 			t.Error(err)
 		}
 	})
-	handler, err := New(storage, node, logger)
+	handler, err := New(storage, node, blobs, logger)
 	if err != nil {
 		t.Fatal(err)
 	}

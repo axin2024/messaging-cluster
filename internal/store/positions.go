@@ -73,6 +73,7 @@ func (s *Store) setPosition(ctx context.Context, session Session, id, seq uint64
 func (s *Store) ReadState(ctx context.Context, session Session, id uint64) (ReadState, error) {
 	query := `SELECT COALESCE(r.seq, 0), (SELECT COUNT(*) FROM messages AS m
 			WHERE m.conversation_id = i.conversation_id AND m.seq >= c.retained_from_seq
+			AND m.retracted_at IS NULL
 			AND m.seq > COALESCE(r.seq, 0) AND m.seq <= i.high_seq AND m.sender_id <> i.user_id
 			AND ` + messageVisibleToUser + `)
 		FROM inbox AS i JOIN conversations AS c ON c.id = i.conversation_id

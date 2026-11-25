@@ -5,18 +5,29 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"strconv"
+	"strings"
 	"time"
 )
 
 type Message struct {
-	ConversationID uint64    `json:"conversation_id"`
-	Seq            uint64    `json:"seq"`
-	SenderID       uint64    `json:"sender_id"`
-	ClientID       string    `json:"client_id"`
-	Body           string    `json:"body"`
-	CreatedAt      time.Time `json:"created_at"`
-	Expired        bool      `json:"expired,omitempty"`
+	ConversationID uint64     `json:"conversation_id"`
+	Seq            uint64     `json:"seq"`
+	SenderID       uint64     `json:"sender_id"`
+	ClientID       string     `json:"client_id"`
+	Body           string     `json:"body"`
+	CreatedAt      time.Time  `json:"created_at"`
+	Expired        bool       `json:"expired,omitempty"`
+	RetractedAt    *time.Time `json:"retracted_at,omitempty"`
+	AttachmentIDs  []uint64   `json:"attachment_ids,omitempty"`
+}
+
+type OutgoingMessage struct {
+	ClientID      string   `json:"client_id"`
+	Body          string   `json:"body"`
+	AttachmentIDs []uint64 `json:"attachment_ids,omitempty"`
 }
 
 type MessageReceipt struct {
@@ -24,9 +35,11 @@ type MessageReceipt struct {
 	Duplicate bool    `json:"duplicate"`
 }
 
-const messageColumns = "m.conversation_id, m.seq, m.sender_id, m.client_id, m.body, m.created_at, m.expired_at IS NOT NULL"
+const messageColumns = `m.conversation_id, m.seq, m.sender_id, m.client_id, m.body, m.created_at, m.expired_at IS NOT NULL, m.retracted_at,
+	CASE WHEN m.retracted_at IS NULL AND m.expired_at IS NULL THEN (SELECT GROUP_CONCAT(ma.attachment_id ORDER BY ma.ordinal)
+		FROM message_attachments AS ma WHERE ma.conversation_id = m.conversation_id AND ma.seq = m.seq) END`
 
-func (s *Store) SendMessage(ctx context.Context, session Session, connection *Connection, id uint64, clientID, body string) (MessageReceipt, error) {
+func (s *Store) SendMessage(ctx context.Context, session Session, connection *Connection, id uint64, input OutgoingMessage) (MessageReceipt, error) {
 	tx, err := s.beginConversationWrite(ctx, session)
 	if err != nil {
 		return MessageReceipt{}, err
@@ -44,10 +57,10 @@ func (s *Store) SendMessage(ctx context.Context, session Session, connection *Co
 	if _, err := activeMember(ctx, tx, id, session.UserID); err != nil {
 		return MessageReceipt{}, err
 	}
-	hash := sha256.Sum256([]byte(body))
+	hash := messageHash(input)
 	var previousHash []byte
 	previous, err := scanMessage(tx.QueryRowContext(ctx, `SELECT `+messageColumns+`, m.payload_hash FROM messages AS m
-		WHERE m.sender_id = ? AND m.sender_device_id = ? AND m.client_id = ?`, session.UserID, session.DeviceID, clientID), &previousHash)
+		WHERE m.sender_id = ? AND m.sender_device_id = ? AND m.client_id = ?`, session.UserID, session.DeviceID, input.ClientID), &previousHash)
 	if err == nil {
 		if previous.ConversationID != id || !bytes.Equal(hash[:], previousHash) {
 			return MessageReceipt{}, ErrPayloadConflict
@@ -62,10 +75,13 @@ func (s *Store) SendMessage(ctx context.Context, session Session, connection *Co
 	}
 	seq := conversation.lastSeq + 1
 	if _, err := tx.ExecContext(ctx, `INSERT INTO messages (tenant_id, app_id, conversation_id, seq, sender_id, sender_device_id, client_id, payload_hash, body)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, session.TenantID, session.AppID, id, seq, session.UserID, session.DeviceID, clientID, hash[:], body); err != nil {
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, session.TenantID, session.AppID, id, seq, session.UserID, session.DeviceID, input.ClientID, hash[:], input.Body); err != nil {
 		if errors.Is(conflict(err), ErrConflict) {
 			return MessageReceipt{}, ErrPayloadConflict
 		}
+		return MessageReceipt{}, err
+	}
+	if err := addMessageAttachments(ctx, tx, session, id, seq, input.AttachmentIDs); err != nil {
 		return MessageReceipt{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO message_outbox (conversation_id, seq) VALUES (?, ?)`, id, seq); err != nil {
@@ -86,6 +102,15 @@ func (s *Store) SendMessage(ctx context.Context, session Session, connection *Co
 		return MessageReceipt{}, err
 	}
 	return MessageReceipt{Message: message}, nil
+}
+
+func messageHash(input OutgoingMessage) [32]byte {
+	if len(input.AttachmentIDs) == 0 {
+		return sha256.Sum256([]byte(input.Body))
+	}
+	// Invalid UTF-8 separates attachment payloads from legacy plain-text hashes.
+	encoded, _ := json.Marshal(input)
+	return sha256.Sum256(append([]byte{0xff}, encoded...))
 }
 
 func (s *Store) MessageByClientID(ctx context.Context, session Session, id uint64, clientID string) (Message, error) {
@@ -114,11 +139,25 @@ func checkMessageConnection(ctx context.Context, tx *sql.Tx, session Session, co
 
 func scanMessage(row interface{ Scan(...any) error }, hash *[]byte) (Message, error) {
 	var message Message
-	fields := []any{&message.ConversationID, &message.Seq, &message.SenderID, &message.ClientID, &message.Body, &message.CreatedAt, &message.Expired}
+	var attachments sql.NullString
+	fields := []any{&message.ConversationID, &message.Seq, &message.SenderID, &message.ClientID, &message.Body, &message.CreatedAt,
+		&message.Expired, &message.RetractedAt, &attachments}
 	if hash != nil {
 		fields = append(fields, hash)
 	}
-	return message, row.Scan(fields...)
+	if err := row.Scan(fields...); err != nil {
+		return Message{}, err
+	}
+	if attachments.Valid {
+		for raw := range strings.SplitSeq(attachments.String, ",") {
+			id, err := strconv.ParseUint(raw, 10, 64)
+			if err != nil {
+				return Message{}, err
+			}
+			message.AttachmentIDs = append(message.AttachmentIDs, id)
+		}
+	}
+	return message, nil
 }
 
 const membershipScope = `tenant_id = ? AND app_id = ? AND conversation_id = ? AND user_id = ?`

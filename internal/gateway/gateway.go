@@ -152,6 +152,9 @@ func (g *Gateway) maintain(ctx context.Context) {
 			if err := g.store.PruneGatewayTickets(prune); err != nil && ctx.Err() == nil {
 				g.logger.Warn("could not prune gateway tickets", "node", g.node.ID, "error", err)
 			}
+			if err := g.store.PruneAttachmentGrants(prune); err != nil && ctx.Err() == nil {
+				g.logger.Warn("could not prune attachment passes", "node", g.node.ID, "error", err)
+			}
 			cancel()
 			nextPrune = time.Now().Add(time.Minute)
 		}

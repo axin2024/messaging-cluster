@@ -32,7 +32,7 @@ func TestIdentityOnMySQL(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer storage.Close()
-	handler, err := New(storage, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	handler, err := New(storage, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

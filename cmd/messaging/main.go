@@ -15,6 +15,7 @@ import (
 	"github.com/axin2024/messaging-cluster/internal/credential"
 	"github.com/axin2024/messaging-cluster/internal/gateway"
 	"github.com/axin2024/messaging-cluster/internal/httpapi"
+	"github.com/axin2024/messaging-cluster/internal/media"
 	"github.com/axin2024/messaging-cluster/internal/store"
 )
 
@@ -105,12 +106,21 @@ func serve(dsn string, logger *slog.Logger) error {
 	if !credential.ValidKey(nodeName) {
 		return errors.New("invalid MESSAGING_NODE_NAME")
 	}
+	blobPath := os.Getenv("MESSAGING_ATTACHMENT_DIR")
+	if blobPath == "" {
+		blobPath = "storage/attachments"
+	}
+	blobs, err := media.OpenLocal(blobPath)
+	if err != nil {
+		return fmt.Errorf("open attachment store: %w", err)
+	}
+	defer blobs.Close()
 	cluster, err := gateway.Start(ctx, storage, nodeName, gateway.DefaultConfig(), logger)
 	if err != nil {
 		return err
 	}
 	defer cluster.Close()
-	handler, err := httpapi.New(storage, cluster, logger)
+	handler, err := httpapi.New(storage, cluster, blobs, logger)
 	if err != nil {
 		return err
 	}

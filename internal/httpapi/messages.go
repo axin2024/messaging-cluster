@@ -9,18 +9,15 @@ import (
 )
 
 func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, session store.Session, id uint64) {
-	var input struct {
-		ClientID string `json:"client_id"`
-		Body     string `json:"body"`
-	}
+	var input store.OutgoingMessage
 	if !read(w, r, &input) {
 		return
 	}
-	if !credential.ValidMessage(input.ClientID, input.Body) {
+	if !credential.ValidMessage(input.ClientID, input.Body, input.AttachmentIDs) {
 		problem(w, http.StatusBadRequest, "invalid_message")
 		return
 	}
-	receipt, err := s.store.SendMessage(r.Context(), session, nil, id, input.ClientID, input.Body)
+	receipt, err := s.store.SendMessage(r.Context(), session, nil, id, input)
 	if err != nil {
 		s.fail(w, r, err)
 		return

@@ -14,6 +14,7 @@ import (
 
 	"github.com/axin2024/messaging-cluster/internal/credential"
 	"github.com/axin2024/messaging-cluster/internal/gateway"
+	"github.com/axin2024/messaging-cluster/internal/media"
 	"github.com/axin2024/messaging-cluster/internal/store"
 )
 
@@ -22,15 +23,18 @@ type Server struct {
 	gateway      *gateway.Gateway
 	logger       *slog.Logger
 	passwordJobs chan struct{}
+	uploadJobs   chan struct{}
 	dummyHash    []byte
+	blobs        media.Blobs
 }
 
-func New(storage *store.Store, cluster *gateway.Gateway, logger *slog.Logger) (http.Handler, error) {
+func New(storage *store.Store, cluster *gateway.Gateway, blobs media.Blobs, logger *slog.Logger) (http.Handler, error) {
 	dummy, err := credential.HashPassword("unregistered-account-marker")
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{store: storage, gateway: cluster, logger: logger, passwordJobs: make(chan struct{}, 4), dummyHash: dummy}
+	s := &Server{store: storage, gateway: cluster, blobs: blobs, logger: logger,
+		passwordJobs: make(chan struct{}, 4), uploadJobs: make(chan struct{}, 8), dummyHash: dummy}
 	routes := http.NewServeMux()
 	routes.HandleFunc("GET /healthz", s.health)
 	routes.HandleFunc("GET /readyz", s.ready)
@@ -52,7 +56,13 @@ func New(storage *store.Store, cluster *gateway.Gateway, logger *slog.Logger) (h
 	routes.HandleFunc("POST /v1/conversations/{id}/messages", s.conversationRoute(s.sendMessage))
 	routes.HandleFunc("GET /v1/conversations/{id}/messages", s.conversationRoute(s.listMessages))
 	routes.HandleFunc("GET /v1/conversations/{id}/messages/{seq}", s.conversationRoute(s.getMessage))
+	routes.HandleFunc("DELETE /v1/conversations/{id}/messages/{seq}", s.conversationRoute(s.retractMessage))
 	routes.HandleFunc("GET /v1/conversations/{id}/messages/by-client/{client_id}", s.conversationRoute(s.getMessageByClientID))
+	routes.HandleFunc("GET /v1/conversations/{id}/retractions", s.conversationRoute(s.retractions))
+	routes.HandleFunc("POST /v1/conversations/{id}/messages/{seq}/attachments/{attachment}/grants", s.conversationRoute(s.attachmentGrant))
+	routes.HandleFunc("POST /v1/attachments", s.createAttachment)
+	routes.HandleFunc("PUT /v1/attachments/{attachment}/content", s.uploadAttachment)
+	routes.HandleFunc("GET /v1/attachment-content", s.attachmentContent)
 	routes.HandleFunc("GET /v1/inbox", s.inbox)
 	routes.HandleFunc("GET /v1/conversations/{id}/sync", s.conversationRoute(s.sync))
 	routes.HandleFunc("PUT /v1/conversations/{id}/sync", s.conversationRoute(s.acknowledgeSync))
@@ -191,6 +201,8 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		problem(w, http.StatusForbidden, "forbidden")
 	case errors.Is(err, store.ErrHistoryExpired):
 		problem(w, http.StatusGone, "history_expired")
+	case errors.Is(err, store.ErrInvalidAttachment):
+		problem(w, http.StatusUnprocessableEntity, "attachment_unavailable")
 	case errors.Is(err, store.ErrPayloadConflict):
 		problem(w, http.StatusConflict, "client_id_payload_conflict")
 	case errors.Is(err, store.ErrConflict):

@@ -11,13 +11,14 @@ import (
 )
 
 var (
-	ErrUnauthorized    = errors.New("unauthorized")
-	ErrForbidden       = errors.New("forbidden")
-	ErrNotFound        = errors.New("not found")
-	ErrConflict        = errors.New("conflict")
-	ErrLeaseLost       = errors.New("gateway lease lost")
-	ErrPayloadConflict = errors.New("client message ID already has a different payload")
-	ErrHistoryExpired  = errors.New("message history expired")
+	ErrUnauthorized      = errors.New("unauthorized")
+	ErrForbidden         = errors.New("forbidden")
+	ErrNotFound          = errors.New("not found")
+	ErrConflict          = errors.New("conflict")
+	ErrLeaseLost         = errors.New("gateway lease lost")
+	ErrPayloadConflict   = errors.New("client message ID already has a different payload")
+	ErrHistoryExpired    = errors.New("message history expired")
+	ErrInvalidAttachment = errors.New("attachment is unavailable for sending")
 )
 
 type Store struct {
