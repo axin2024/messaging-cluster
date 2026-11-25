@@ -14,6 +14,7 @@ var (
 	ErrUnauthorized = errors.New("unauthorized")
 	ErrNotFound     = errors.New("not found")
 	ErrConflict     = errors.New("conflict")
+	ErrLeaseLost    = errors.New("gateway lease lost")
 )
 
 type Store struct {
@@ -73,8 +74,8 @@ func (s *Store) Ready(ctx context.Context) error {
 	if err := s.db.QueryRowContext(ctx, "SELECT version, dirty FROM schema_migrations").Scan(&version, &dirty); err != nil {
 		return fmt.Errorf("read schema version: %w", err)
 	}
-	if version != schemaVersion || dirty {
-		return fmt.Errorf("expected clean schema version %d", schemaVersion)
+	if version != SchemaVersion || dirty {
+		return fmt.Errorf("expected clean schema version %d", SchemaVersion)
 	}
 	return nil
 }

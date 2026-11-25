@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/axin2024/messaging-cluster/internal/credential"
+	"github.com/axin2024/messaging-cluster/internal/gateway"
 	"github.com/axin2024/messaging-cluster/internal/httpapi"
 	"github.com/axin2024/messaging-cluster/internal/store"
 )
@@ -97,7 +98,19 @@ func serve(dsn string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	handler, err := httpapi.New(storage, logger)
+	nodeName := os.Getenv("MESSAGING_NODE_NAME")
+	if nodeName == "" {
+		nodeName = "gateway"
+	}
+	if !credential.ValidKey(nodeName) {
+		return errors.New("invalid MESSAGING_NODE_NAME")
+	}
+	cluster, err := gateway.Start(ctx, storage, nodeName, gateway.DefaultConfig(), logger)
+	if err != nil {
+		return err
+	}
+	defer cluster.Close()
+	handler, err := httpapi.New(storage, cluster, logger)
 	if err != nil {
 		return err
 	}
@@ -118,8 +131,9 @@ func serve(dsn string, logger *slog.Logger) error {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return server.Shutdown(shutdownCtx)
+	case <-cluster.Done():
 	}
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	return errors.Join(server.Shutdown(shutdownCtx), cluster.Close())
 }

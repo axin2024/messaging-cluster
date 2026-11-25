@@ -11,7 +11,7 @@ import (
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 )
 
-const schemaVersion = 1
+const SchemaVersion = 2
 
 //go:embed migrations/*.sql
 var migrations embed.FS
@@ -44,8 +44,8 @@ func Migrate(dsn string) (uint, error) {
 	if err != nil {
 		return 0, fmt.Errorf("verify migrations: %w", err)
 	}
-	if version != schemaVersion || dirty {
-		return 0, fmt.Errorf("expected clean migration version %d", schemaVersion)
+	if version != SchemaVersion || dirty {
+		return 0, fmt.Errorf("expected clean migration version %d", SchemaVersion)
 	}
 	return version, nil
 }

@@ -13,22 +13,24 @@ import (
 	"time"
 
 	"github.com/axin2024/messaging-cluster/internal/credential"
+	"github.com/axin2024/messaging-cluster/internal/gateway"
 	"github.com/axin2024/messaging-cluster/internal/store"
 )
 
 type Server struct {
 	store        *store.Store
+	gateway      *gateway.Gateway
 	logger       *slog.Logger
 	passwordJobs chan struct{}
 	dummyHash    []byte
 }
 
-func New(storage *store.Store, logger *slog.Logger) (http.Handler, error) {
+func New(storage *store.Store, cluster *gateway.Gateway, logger *slog.Logger) (http.Handler, error) {
 	dummy, err := credential.HashPassword("unregistered-account-marker")
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{store: storage, logger: logger, passwordJobs: make(chan struct{}, 4), dummyHash: dummy}
+	s := &Server{store: storage, gateway: cluster, logger: logger, passwordJobs: make(chan struct{}, 4), dummyHash: dummy}
 	routes := http.NewServeMux()
 	routes.HandleFunc("GET /healthz", s.health)
 	routes.HandleFunc("GET /readyz", s.ready)
@@ -38,6 +40,12 @@ func New(storage *store.Store, logger *slog.Logger) (http.Handler, error) {
 	routes.HandleFunc("GET /v1/devices", s.listDevices)
 	routes.HandleFunc("POST /v1/devices/current/rotate", s.rotate)
 	routes.HandleFunc("DELETE /v1/devices/{id}", s.revoke)
+	routes.HandleFunc("GET /v1/devices/{id}/presence", s.presence)
+	routes.HandleFunc("GET /v1/devices/{id}/connections", s.connections)
+	if cluster != nil {
+		routes.HandleFunc("POST /v1/gateway/tickets", s.gatewayTicket)
+		routes.HandleFunc("GET /v1/gateway", s.upgradeGateway)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -50,6 +58,10 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	if s.gateway != nil && !s.gateway.Ready() {
+		write(w, http.StatusServiceUnavailable, map[string]bool{"ready": false})
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	if err := s.store.Ready(ctx); err != nil {

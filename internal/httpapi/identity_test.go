@@ -21,16 +21,9 @@ import (
 )
 
 func TestIdentityOnMySQL(t *testing.T) {
-	dsn := os.Getenv("MESSAGING_TEST_MYSQL_DSN")
-	if dsn == "" {
-		t.Skip("set MESSAGING_TEST_MYSQL_DSN for MySQL integration")
-	}
-	config, err := mysql.ParseDSN(dsn)
-	if err != nil || !strings.HasPrefix(config.DBName, "messaging_test_") {
-		t.Fatal("use an isolated MySQL database named messaging_test_*")
-	}
+	dsn := testMySQLDSN(t)
 	for range 2 {
-		if version, err := store.Migrate(dsn); err != nil || version != 1 {
+		if version, err := store.Migrate(dsn); err != nil || version != store.SchemaVersion {
 			t.Fatalf("migrate schema: version %d, error %v", version, err)
 		}
 	}
@@ -39,7 +32,7 @@ func TestIdentityOnMySQL(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer storage.Close()
-	handler, err := New(storage, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	handler, err := New(storage, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,6 +145,19 @@ func TestIdentityOnMySQL(t *testing.T) {
 
 type identityFixture struct {
 	handler http.Handler
+}
+
+func testMySQLDSN(t *testing.T) string {
+	t.Helper()
+	dsn := os.Getenv("MESSAGING_TEST_MYSQL_DSN")
+	if dsn == "" {
+		t.Skip("set MESSAGING_TEST_MYSQL_DSN for MySQL integration")
+	}
+	config, err := mysql.ParseDSN(dsn)
+	if err != nil || !strings.HasPrefix(config.DBName, "messaging_test_") {
+		t.Fatal("use an isolated MySQL database named messaging_test_*")
+	}
+	return dsn
 }
 
 func (f identityFixture) check(t *testing.T, method, path, token string, payload any, status int, result any) {
