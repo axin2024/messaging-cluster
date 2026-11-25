@@ -73,9 +73,6 @@ func (s *Store) SendMessage(ctx context.Context, session Session, connection *Co
 	if !errors.Is(err, sql.ErrNoRows) {
 		return MessageReceipt{}, err
 	}
-	if err := consumeSendQuota(ctx, tx, session.TenantID); err != nil {
-		return MessageReceipt{}, err
-	}
 	seq := conversation.lastSeq + 1
 	if _, err := tx.ExecContext(ctx, `INSERT INTO messages (tenant_id, app_id, conversation_id, seq, sender_id, sender_device_id, client_id, payload_hash, body)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, session.TenantID, session.AppID, id, seq, session.UserID, session.DeviceID, input.ClientID, hash[:], input.Body); err != nil {
@@ -99,6 +96,10 @@ func (s *Store) SendMessage(ctx context.Context, session Session, connection *Co
 	message, err := scanMessage(tx.QueryRowContext(ctx, `SELECT `+messageColumns+` FROM messages AS m
 		WHERE m.conversation_id = ? AND m.seq = ?`, id, seq), nil)
 	if err != nil {
+		return MessageReceipt{}, err
+	}
+	// All apps in the tenant contend on this row. Hold its lock only until commit.
+	if err := consumeSendQuota(ctx, tx, session.TenantID); err != nil {
 		return MessageReceipt{}, err
 	}
 	if err := tx.Commit(); err != nil {

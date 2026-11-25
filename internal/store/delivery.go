@@ -31,7 +31,7 @@ func (s *Store) MaterializeDelivery(ctx context.Context) error {
 		return err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM message_outbox WHERE live_delivery AND dispatched_at IS NULL
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM message_outbox WHERE live_delivery = TRUE AND dispatched_at IS NULL
 		ORDER BY id LIMIT 64 FOR UPDATE SKIP LOCKED`)
 	if err != nil {
 		return err
@@ -136,7 +136,7 @@ func (s *Store) MarkDeliverySent(ctx context.Context, id uint64) error {
 
 func (s *Store) AcknowledgeDelivery(ctx context.Context, connection Connection, id uint64) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE delivery_attempts SET state = 'acked',
-		sent_at = COALESCE(sent_at, UTC_TIMESTAMP(6)), finished_at = UTC_TIMESTAMP(6)
+		sent_at = COALESCE(sent_at, UTC_TIMESTAMP(6)), finished_at = GREATEST(sent_at, UTC_TIMESTAMP(6))
 		WHERE id = ? AND node_id = ? AND device_id = ? AND epoch = ? AND state IN ('offered', 'sent')`,
 		id, connection.Node.ID, connection.DeviceID, connection.Epoch)
 	return err
@@ -154,11 +154,42 @@ func (s *Store) DegradeDeliveries(ctx context.Context, ids []uint64) error {
 
 func (s *Store) ExpireDeliveries(ctx context.Context) error {
 	for _, stage := range []string{"queued", "offered", "sent"} {
-		if _, err := s.db.ExecContext(ctx, `UPDATE delivery_attempts SET state = 'resync', finished_at = UTC_TIMESTAMP(6)
-			WHERE state = ? AND created_at <= TIMESTAMPADD(SECOND, -30, UTC_TIMESTAMP(6))
-			ORDER BY created_at, id LIMIT 2000`, stage); err != nil {
+		if err := s.expireDeliveryStage(ctx, stage); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (s *Store) expireDeliveryStage(ctx context.Context, stage string) error {
+	// Claim existing expired rows without locking index gaps used by live acknowledgements.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM delivery_attempts
+		WHERE state = ? AND created_at <= TIMESTAMPADD(SECOND, -30, UTC_TIMESTAMP(6))
+		ORDER BY created_at, id LIMIT 2000 FOR UPDATE SKIP LOCKED`, stage)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var ids []uint64
+	for rows.Next() {
+		var id uint64
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil || len(ids) == 0 {
+		return err
+	}
+	in, args := eventIDs(ids)
+	if _, err := tx.ExecContext(ctx, `UPDATE delivery_attempts SET state = 'resync', finished_at = UTC_TIMESTAMP(6)
+		WHERE id IN (`+in+`)`, args...); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

@@ -32,3 +32,5 @@ pwsh -File ./scripts/test-mysql.ps1 -MySQLBin 'C:\mysql\bin'
 ```
 
 给脚本传入 `-PreviousBinary` 可额外演练升级。旧二进制从提交 `d29cab8` 构建。脚本先运行旧服务创建账号和消息，再启动升级后的服务，通过原设备令牌验证历史、重放和后续发送。
+
+加上 `-VerifyRestore` 可启动两个独立网关，以同一私有附件卷完成跨进程下载，再将数据库和附件备份恢复到独立路径。使用原设备令牌验证历史、同步游标、已读状态和附件摘要。[部署与备份](deployment.md)

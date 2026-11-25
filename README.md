@@ -18,4 +18,8 @@ go run ./cmd/messaging serve
 
 用不同的 `MESSAGING_NODE_NAME` 和 `MESSAGING_HTTP_ADDR` 启动第二个进程。两个进程使用同一个 `MESSAGING_MYSQL_DSN`，并将 `MESSAGING_ATTACHMENT_DIR` 指向同一个私有存储卷。单节点的附件目录默认为 `storage/attachments`。
 
+[部署配置、升级与备份恢复](docs/deployment.md) · [三账号双网关演示](docs/demo.md)
+
 [身份与设备 API](docs/identity.md) · [长连接网关](docs/gateway.md) · [会话与消息 API](docs/conversations.md) · [离线同步与已读](docs/sync.md) · [附件与撤回](docs/media.md) · [限流与诊断](docs/operations.md) · [Apache License 2.0](LICENSE)
+
+[验收用例与复现](docs/validation.md) · [参与开发](CONTRIBUTING.md) · [安全反馈](SECURITY.md) · [第三方声明](THIRD_PARTY_NOTICES.md)

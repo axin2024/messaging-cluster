@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/axin2024/messaging-cluster/internal/credential"
+	"github.com/axin2024/messaging-cluster/internal/demoui"
 	"github.com/axin2024/messaging-cluster/internal/gateway"
 	"github.com/axin2024/messaging-cluster/internal/httpapi"
 	"github.com/axin2024/messaging-cluster/internal/media"
@@ -150,6 +151,9 @@ func serve(dsn string, logger *slog.Logger) error {
 	handler, err := httpapi.New(storage, cluster, blobs, logger)
 	if err != nil {
 		return err
+	}
+	if os.Getenv("MESSAGING_DEMO_UI") == "1" {
+		handler = demoui.Attach(handler)
 	}
 	addr := os.Getenv("MESSAGING_HTTP_ADDR")
 	if addr == "" {

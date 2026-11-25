@@ -8,23 +8,18 @@ import (
 const DefaultMessagesPerSecond = 250
 
 func consumeSendQuota(ctx context.Context, tx *sql.Tx, tenant uint64) error {
-	var second uint64
-	var limit uint32
-	if err := tx.QueryRowContext(ctx, `SELECT UNIX_TIMESTAMP(), COALESCE(
-		(SELECT messages_per_second FROM tenant_message_limits WHERE tenant_id = ?), ?)`, tenant, DefaultMessagesPerSecond).
-		Scan(&second, &limit); err != nil {
+	result, err := tx.ExecContext(ctx, `INSERT INTO tenant_send_buckets (tenant_id, second_epoch, accepted)
+		VALUES (?, UNIX_TIMESTAMP(), 1) ON DUPLICATE KEY UPDATE accepted = IF(accepted < COALESCE(
+		(SELECT messages_per_second FROM tenant_message_limits WHERE tenant_id = ?), ?), accepted + 1, accepted)`,
+		tenant, tenant, DefaultMessagesPerSecond)
+	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO tenant_send_buckets (tenant_id, second_epoch, accepted)
-		VALUES (?, ?, 1) ON DUPLICATE KEY UPDATE accepted = accepted + 1`, tenant, second); err != nil {
+	changed, err := result.RowsAffected()
+	if err != nil {
 		return err
 	}
-	var used uint32
-	if err := tx.QueryRowContext(ctx, `SELECT accepted FROM tenant_send_buckets WHERE tenant_id = ? AND second_epoch = ?`, tenant, second).
-		Scan(&used); err != nil {
-		return err
-	}
-	if used > limit {
+	if changed == 0 {
 		return ErrRateLimited
 	}
 	return nil

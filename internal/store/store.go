@@ -57,6 +57,7 @@ func openDB(dsn string, multiStatements bool) (*sql.DB, error) {
 	config.Loc = time.UTC
 	config.MultiStatements = multiStatements
 	config.InterpolateParams = false
+	config.ClientFoundRows = false // Quota updates distinguish a changed row from a no-op.
 	config.AllowAllFiles = false
 	config.AllowCleartextPasswords = false
 	config.Timeout = 5 * time.Second

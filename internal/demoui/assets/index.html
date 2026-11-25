@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>消息台 · Messaging Cluster</title>
+  <link rel="stylesheet" href="./style.css">
+  <script defer src="./app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="./" aria-label="消息台首页"><span class="logo" aria-hidden="true">M</span>消息台</a>
+    <div class="identity"><span id="connection" class="connection" data-state="off">未连接</span><button id="logout" type="button" hidden>退出</button></div>
+  </header>
+  <main>
+    <section id="signin" class="signin">
+      <div><h1>登录设备</h1><p>同一账号在不同设备上有各自的同步进度。</p></div>
+      <form id="login-form">
+        <div class="fields"><label>租户<input name="tenant" value="harbor" autocomplete="off" required></label><label>应用<input name="app" value="dispatch" autocomplete="off" required></label></div>
+        <div class="fields"><label>用户名<input name="username" autocomplete="username" required></label><label>设备键<input name="device_key" value="desktop" autocomplete="off" required></label></div>
+        <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+        <button class="primary" type="submit">登录</button>
+      </form>
+    </section>
+    <section id="workspace" class="workspace" hidden>
+      <aside>
+        <div class="sidebar-title"><h1>会话</h1><button type="button" id="reload">刷新</button></div>
+        <div id="accounts" class="accounts"></div>
+        <form id="create-direct" class="inline-form">
+          <label class="sr-only" for="peer">对方用户 ID</label><input id="peer" name="user_id" inputmode="numeric" pattern="[0-9]+" placeholder="对方用户 ID" required>
+          <button type="submit">私聊</button>
+        </form>
+        <form id="create-group" class="inline-form">
+          <label class="sr-only" for="group-name">群聊名称</label><input id="group-name" name="title" maxlength="80" placeholder="群聊名称" required>
+          <button type="submit">建群</button>
+        </form>
+        <ul id="rooms" class="rooms" aria-label="会话列表"></ul>
+      </aside>
+      <section class="conversation" aria-label="会话详情">
+        <div id="empty" class="empty"><h2>选择一个会话</h2><p>也可以输入对方的用户 ID 发起私聊。</p></div>
+        <div id="opened" class="opened" hidden>
+          <header class="room-header">
+            <div><h2 id="room-name"></h2><p id="room-state"></p></div>
+            <button type="button" id="mark-read">标为已读</button>
+          </header>
+          <form id="add-member" class="inline-form member-form" hidden>
+            <label class="sr-only" for="member">成员用户 ID</label><input id="member" name="user_id" inputmode="numeric" pattern="[0-9]+" placeholder="成员用户 ID" required>
+            <button type="submit">添加成员</button>
+          </form>
+          <ol id="messages" class="messages" aria-label="消息记录" aria-live="polite"></ol>
+          <form id="composer" class="composer">
+            <label class="sr-only" for="body">输入消息</label><textarea id="body" name="body" rows="2" placeholder="输入消息"></textarea>
+            <div class="composer-actions">
+              <label class="upload">附件<input name="file" type="file"></label>
+              <button class="primary" type="submit" id="send">发送</button>
+            </div>
+          </form>
+        </div>
+      </section>
+    </section>
+    <p id="feedback" class="feedback" role="status"></p>
+  </main>
+</body>
+</html>

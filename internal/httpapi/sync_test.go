@@ -25,9 +25,13 @@ func TestOfflineSyncAndReadAcrossGatewaysOnMySQL(t *testing.T) {
 	sender := messageTestUser(t, f, tenant, admin, "sender")
 	desktop := messageTestUser(t, f, tenant, admin, "receiver")
 	phone := messageTestLogin(t, f, tenant, "receiver", "phone")
-	var direct store.Conversation
-	f.check(t, "POST", "/v1/conversations/direct", sender.Token, map[string]uint64{"user_id": desktop.Session.UserID}, http.StatusOK, &direct)
-	base := fmt.Sprintf("/v1/conversations/%d", direct.ID)
+	var group store.Conversation
+	f.check(t, "POST", "/v1/conversations/group", sender.Token, map[string]string{
+		"title": "Shift handoff", "history_policy": "since_join",
+	}, http.StatusCreated, &group)
+	base := fmt.Sprintf("/v1/conversations/%d", group.ID)
+	memberPath := fmt.Sprintf("%s/members/%d", base, desktop.Session.UserID)
+	f.check(t, "PUT", memberPath, sender.Token, map[string]string{"role": "member"}, http.StatusOK, nil)
 	messagePath := base + "/messages"
 	syncPath := base + "/sync"
 	readPath := base + "/read"
@@ -46,7 +50,7 @@ func TestOfflineSyncAndReadAcrossGatewaysOnMySQL(t *testing.T) {
 	writer, _ := dialGateway(t, first.URL, sender.Token, "")
 	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Second)
 	defer cancel()
-	if err := wsjson.Write(ctx, writer, map[string]any{"type": "message.send", "conversation_id": direct.ID,
+	if err := wsjson.Write(ctx, writer, map[string]any{"type": "message.send", "conversation_id": group.ID,
 		"request_id": "lost-receipt", "client_id": "batch-41", "body": "Message 41"}); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +82,7 @@ func TestOfflineSyncAndReadAcrossGatewaysOnMySQL(t *testing.T) {
 	}
 	var inbox page[store.InboxEntry]
 	getFromGateway(t, second, "/v1/inbox", phone.Token, &inbox)
-	if len(inbox.Items) != 1 || inbox.Items[0] != (store.InboxEntry{ConversationID: direct.ID, HighSeq: 42, SyncSeq: 40, ReadSeq: 40}) {
+	if len(inbox.Items) != 1 || inbox.Items[0] != (store.InboxEntry{ConversationID: group.ID, HighSeq: 42, SyncSeq: 40, ReadSeq: 40}) {
 		t.Fatalf("phone inbox did not retain its positions: %+v", inbox.Items)
 	}
 	var messages store.SyncPage
@@ -108,6 +112,11 @@ func TestOfflineSyncAndReadAcrossGatewaysOnMySQL(t *testing.T) {
 	assertReadState(t, f2, readPath, phone.Token, 42, 0)
 	f2.check(t, "POST", messagePath, sender.Token, syncTestMessage(44), http.StatusCreated, nil)
 	assertReadState(t, f2, readPath, phone.Token, 42, 1)
+	f2.check(t, "DELETE", memberPath, phone.Token, nil, http.StatusNoContent, nil)
+	f2.check(t, "POST", messagePath, sender.Token, syncTestMessage(45), http.StatusCreated, nil)
+	f2.check(t, "GET", messagePath+"/45", phone.Token, nil, http.StatusForbidden, nil)
+	getFromGateway(t, second, syncPath, phone.Token, &messages)
+	assertSyncPage(t, messages, 44, false, 43, 44)
 }
 
 func TestRetentionReportsOnlyAuthorizedGapsOnMySQL(t *testing.T) {

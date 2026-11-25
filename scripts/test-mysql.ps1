@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory)][string]$MySQLBin,
-    [string]$PreviousBinary
+    [string]$PreviousBinary,
+    [switch]$VerifyRestore
 )
 
 $ErrorActionPreference = 'Stop'
@@ -41,6 +42,89 @@ function New-FixtureSession([string]$Tenant, [string]$Token, [string]$Username) 
     Invoke-RestMethod "$origin/v1/sessions" -Method Post -ContentType 'application/json' -Body ($login | ConvertTo-Json)
 }
 
+function Stop-FixtureProcess($Process) {
+    if ($Process -and !$Process.HasExited) {
+        Stop-Process -Id $Process.Id
+        if (!$Process.WaitForExit(5000)) { throw 'Fixture process did not stop' }
+    }
+}
+
+function Assert-FixtureAttachment([string]$Origin, [string]$GrantPath, [hashtable]$Headers, [string]$Destination, [string]$ExpectedHash) {
+    $grant = Invoke-RestMethod "$Origin$GrantPath" -Method Post -Headers $Headers
+    Invoke-WebRequest "$Origin/v1/attachment-content" -Headers @{ Authorization = 'Attachment ' + $grant.token } -OutFile $Destination
+    if ((Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash -ne $ExpectedHash) { throw 'Attachment digest mismatch' }
+}
+
+function Test-FixtureRestore($SourceProcess, $Sender, [string]$AdminToken) {
+    $peer = $null
+    $recovered = $null
+    try {
+        $peerPort = New-LoopbackPort
+        $peerOrigin = "http://127.0.0.1:$peerPort"
+        $env:MESSAGING_HTTP_ADDR = "127.0.0.1:$peerPort"
+        $env:MESSAGING_NODE_NAME = 'fixture-peer'
+        $peer = Start-Process -FilePath $binary -ArgumentList 'serve' -PassThru -WindowStyle Hidden -RedirectStandardError "$fixtureRoot/peer.log"
+        Wait-Ready $peer $peerOrigin
+
+        $reader = New-FixtureSession 'harbor' $AdminToken 'receiver'
+        $senderHeaders = @{ Authorization = 'Bearer ' + $Sender.token }
+        $readerHeaders = @{ Authorization = 'Bearer ' + $reader.token }
+        $openChat = @{ user_id = $reader.session.user_id } | ConvertTo-Json
+        $chat = Invoke-RestMethod "$origin/v1/conversations/direct" -Method Post -ContentType 'application/json' -Headers $senderHeaders -Body $openChat
+        $path = "/v1/conversations/$($chat.id)"
+        $bytes = [Text.Encoding]::UTF8.GetBytes('Harbor recovery attachment')
+        $digest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+        $metadata = @{ filename = 'dispatch.txt'; content_type = 'application/octet-stream'; size = $bytes.Length; sha256 = $digest }
+        $attachment = Invoke-RestMethod "$origin/v1/attachments" -Method Post -ContentType 'application/json' -Headers $senderHeaders -Body ($metadata | ConvertTo-Json)
+        Invoke-RestMethod "$origin/v1/attachments/$($attachment.id)/content" -Method Put -ContentType 'application/octet-stream' -Headers $senderHeaders -Body $bytes | Out-Null
+        $send = @{ client_id = 'restore-sample'; body = 'Original dispatch'; attachment_ids = @($attachment.id) } | ConvertTo-Json
+        $receipt = Invoke-RestMethod "$origin$path/messages" -Method Post -ContentType 'application/json' -Headers $senderHeaders -Body $send
+        if ($receipt.message.seq -ne 1) { throw 'Expected a new durable message' }
+        foreach ($action in @('sync', 'read')) {
+            Invoke-RestMethod "$peerOrigin$path/$action" -Method Put -ContentType 'application/json' -Headers $readerHeaders -Body '{"seq":1}' | Out-Null
+        }
+        $grantPath = "$path/messages/1/attachments/$($attachment.id)/grants"
+        Assert-FixtureAttachment $peerOrigin $grantPath $readerHeaders "$fixtureRoot/download-before.bin" $digest
+
+        Stop-FixtureProcess $SourceProcess
+        Stop-FixtureProcess $peer
+        $dump = "$fixtureRoot/messaging.sql"
+        $restoreDb = "${dbName}_restore"
+        $env:MYSQL_PWD = $adminPassword
+        & $mysqldump @adminArgs '--single-transaction' '--hex-blob' '--no-tablespaces' '--set-gtid-purged=OFF' "--result-file=$dump" $dbName
+        Assert-Exit 'backup fixture database'
+        $restoredBlobs = "$fixtureRoot/restored-attachments"
+        Copy-Item -LiteralPath $env:MESSAGING_ATTACHMENT_DIR -Destination $restoredBlobs -Recurse
+        & $mysql @adminArgs "--execute=CREATE DATABASE $restoreDb CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci; GRANT ALL PRIVILEGES ON $restoreDb.* TO 'messaging_test'@'127.0.0.1'"
+        Assert-Exit 'prepare empty restore database'
+        $importLog = "$fixtureRoot/restore-import.log"
+        $import = Start-Process -FilePath $mysql -ArgumentList ($adminArgs + $restoreDb) -RedirectStandardInput $dump `
+            -RedirectStandardError $importLog -WindowStyle Hidden -Wait -PassThru
+        if ($import.ExitCode -ne 0) { throw "MySQL import exited with code $($import.ExitCode). See $importLog" }
+
+        $env:MESSAGING_MYSQL_DSN = "messaging_test:${appPassword}@tcp(127.0.0.1:$dbPort)/$restoreDb"
+        $env:MESSAGING_ATTACHMENT_DIR = $restoredBlobs
+        $env:MESSAGING_NODE_NAME = 'fixture-restored'
+        $recovered = Start-Process -FilePath $binary -ArgumentList 'serve' -PassThru -WindowStyle Hidden -RedirectStandardError "$fixtureRoot/restored.log"
+        Wait-Ready $recovered $peerOrigin
+
+        $history = Invoke-RestMethod "$peerOrigin$path/sync?after=0" -Headers $readerHeaders
+        $cursor = Invoke-RestMethod "$peerOrigin$path/sync" -Headers $readerHeaders
+        $read = Invoke-RestMethod "$peerOrigin$path/read" -Headers $readerHeaders
+        if ($history.items.Count -ne 1 -or $history.items[0].client_id -ne 'restore-sample' -or $history.items[0].body -ne 'Original dispatch' -or
+            $history.items[0].attachment_ids[0] -ne $attachment.id -or $cursor.items.Count -ne 0 -or $cursor.next_after -ne 1 -or $read.read_seq -ne 1) {
+            throw 'Restored message, attachment reference, or device checkpoint did not match'
+        }
+        Assert-FixtureAttachment $peerOrigin $grantPath $readerHeaders "$fixtureRoot/download-after.bin" $digest
+        $continued = Invoke-RestMethod "$peerOrigin$path/messages" -Method Post -ContentType 'application/json' -Headers $senderHeaders -Body '{"client_id":"restored-write","body":"Next dispatch"}'
+        if ($continued.message.seq -ne 2) { throw 'Restored conversation did not continue at sequence 2' }
+        Write-Output "Two standalone gateways and isolated restore passed: message seq 1, sync/read seq 1, attachment SHA-256 $digest, next write seq 2."
+    } finally {
+        Stop-FixtureProcess $recovered
+        Stop-FixtureProcess $peer
+    }
+}
+
 $fixtureKey = [guid]::NewGuid().ToString('N').Substring(0, 10)
 $projectRoot = Split-Path $PSScriptRoot -Parent
 $fixtureRoot = Join-Path $projectRoot "storage/mysql-$fixtureKey"
@@ -53,9 +137,11 @@ $appPassword = [guid]::NewGuid().ToString('N')
 $mysql = Join-Path $MySQLBin 'mysql.exe'
 $mysqld = Join-Path $MySQLBin 'mysqld.exe'
 $mysqladmin = Join-Path $MySQLBin 'mysqladmin.exe'
+$mysqldump = Join-Path $MySQLBin 'mysqldump.exe'
 $adminArgs = @('--no-defaults', '--protocol=TCP', '--host=127.0.0.1', "--port=$dbPort", '--user=root')
 $serverArgs = @('--no-defaults', '--innodb-buffer-pool-size=32M', '--max-connections=48', '--mysqlx=OFF',
-    "--basedir=$(Split-Path $MySQLBin -Parent)", "--datadir=$fixtureRoot/data", "--log-error=$fixtureRoot/mysql.log")
+    ('--basedir="{0}"' -f (Split-Path $MySQLBin -Parent)), ('--datadir="{0}/data"' -f $fixtureRoot),
+    ('--log-error="{0}/mysql.log"' -f $fixtureRoot))
 $bootstrapFile = "$fixtureRoot/init.sql"
 $dbProcess = $null
 $appProcess = $null
@@ -76,7 +162,7 @@ CREATE DATABASE $dbName CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 CREATE USER 'messaging_test'@'127.0.0.1' IDENTIFIED BY '$appPassword';
 GRANT ALL PRIVILEGES ON $dbName.* TO 'messaging_test'@'127.0.0.1';
 "@ | Set-Content -LiteralPath $bootstrapFile -Encoding ascii
-    $dbProcess = Start-Process -FilePath $mysqld -ArgumentList ($serverArgs + @('--bind-address=127.0.0.1', "--port=$dbPort", "--init-file=$bootstrapFile")) -PassThru -WindowStyle Hidden
+    $dbProcess = Start-Process -FilePath $mysqld -ArgumentList ($serverArgs + @('--bind-address=127.0.0.1', "--port=$dbPort", ('--init-file="{0}"' -f $bootstrapFile))) -PassThru -WindowStyle Hidden
     $env:MYSQL_PWD = $adminPassword
     $version = $null
     for ($i = 0; $i -lt 40; $i++) {
@@ -119,7 +205,14 @@ GRANT ALL PRIVILEGES ON $dbName.* TO 'messaging_test'@'127.0.0.1';
         & $binary migrate
         Assert-Exit 'migration from schema 5'
     }
-    go test -count=1 -v ./...
+    if ($env:MESSAGING_CAPACITY_TEST -eq 'full') {
+        go test -count=1 -timeout 20m -json ./... | ForEach-Object {
+            $event = $_ | ConvertFrom-Json
+            if ($event.action -eq 'output') { Write-Output $event.output.TrimEnd() }
+        }
+    } else {
+        go test -count=1 -v ./...
+    }
     Assert-Exit 'MySQL integration'
     & $binary migrate
     Assert-Exit 'migration replay'
@@ -145,16 +238,23 @@ GRANT ALL PRIVILEGES ON $dbName.* TO 'messaging_test'@'127.0.0.1';
         Write-Output 'Schema 5 to 6 preserved the original session, message, idempotency key, and next sequence.'
     }
     Write-Output 'CLI migration, app bootstrap, standalone HTTP readiness, login, and bearer readback passed.'
+    if ($VerifyRestore) { Test-FixtureRestore $appProcess $session $app.admin_token }
 } finally {
-    if ($appProcess -and !$appProcess.HasExited) { Stop-Process -Id $appProcess.Id }
-    if ($dbProcess -and !$dbProcess.HasExited) {
-        $env:MYSQL_PWD = $adminPassword
-        & $mysqladmin @adminArgs shutdown 2>$null
-        if (!$dbProcess.WaitForExit(5000)) { Stop-Process -Id $dbProcess.Id }
+    try {
+        Stop-FixtureProcess $appProcess
+        if ($dbProcess -and !$dbProcess.HasExited) {
+            $env:MYSQL_PWD = $adminPassword
+            try {
+                & $mysqladmin @adminArgs shutdown 2>$null
+            } finally {
+                if (!$dbProcess.WaitForExit(5000)) { Stop-FixtureProcess $dbProcess }
+            }
+        }
+        if (Test-Path -LiteralPath $bootstrapFile) { Remove-Item -LiteralPath $bootstrapFile }
+    } finally {
+        foreach ($entry in $environment.GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process')
+        }
+        Pop-Location
     }
-    if (Test-Path -LiteralPath $bootstrapFile) { Remove-Item -LiteralPath $bootstrapFile }
-    foreach ($entry in $environment.GetEnumerator()) {
-        [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process')
-    }
-    Pop-Location
 }

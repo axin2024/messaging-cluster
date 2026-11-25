@@ -1,0 +1,58 @@
+name: MySQL acceptance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      full_capacity:
+        description: Run the 1,000-connection, ten-minute acceptance
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  mysql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_RANDOM_ROOT_PASSWORD: '1'
+          MYSQL_DATABASE: messaging_test_ci
+          MYSQL_USER: messaging_test
+          MYSQL_PASSWORD: local-ci-only-password
+        ports:
+          - 3306/tcp
+        options: >-
+          --health-cmd="mysqladmin --protocol=tcp ping --silent"
+          --health-interval=5s
+          --health-timeout=4s
+          --health-retries=24
+    env:
+      MESSAGING_CAPACITY_TEST: ${{ inputs.full_capacity && 'full' || 'smoke' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Check Go and browser code
+        run: |
+          test -z "$(gofmt -l cmd internal)"
+          go vet ./...
+          node --check internal/demoui/assets/app.js
+      - name: Run MySQL integration and capacity tests
+        env:
+          MYSQL_TEST_PORT: ${{ job.services.mysql.ports[3306] }}
+        run: |
+          export MESSAGING_TEST_MYSQL_DSN="messaging_test:local-ci-only-password@tcp(127.0.0.1:$MYSQL_TEST_PORT)/messaging_test_ci"
+          go test -count=1 -timeout 20m -v ./...
+      - name: Build the standalone binary
+        run: go build -trimpath -o "$RUNNER_TEMP/messaging" ./cmd/messaging

@@ -135,6 +135,7 @@ func (g *Gateway) receive(ctx context.Context, socket *websocket.Conn, session s
 				client.delivery.ack(request.DeliveryID)
 				continue
 			}
+			g.logger.Warn("could not confirm notification", "node", connection.Node.ID, "delivery", request.DeliveryID, "error", err)
 			response.Type, response.Error = "error", "notification_unconfirmed"
 		case "message.send":
 			if request.ConversationID == 0 || !credential.ValidMessage(request.ClientID, request.Body, request.AttachmentIDs) {

@@ -50,7 +50,7 @@ func (s *Store) Diagnostics(ctx context.Context, scope Scope, window int) (Diagn
 	}
 	err = tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(TIMESTAMPDIFF(MICROSECOND, MIN(o.created_at), UTC_TIMESTAMP(6)) DIV 1000, 0)
 		FROM message_outbox AS o JOIN messages AS m ON m.conversation_id = o.conversation_id AND m.seq = o.seq
-		WHERE o.live_delivery AND o.dispatched_at IS NULL AND m.tenant_id = ? AND m.app_id = ?`, scope.TenantID, scope.AppID).
+		WHERE o.live_delivery = TRUE AND o.dispatched_at IS NULL AND m.tenant_id = ? AND m.app_id = ?`, scope.TenantID, scope.AppID).
 		Scan(&result.PendingOutbox, &result.OldestOutboxMillis)
 	if err != nil {
 		return Diagnostics{}, err
