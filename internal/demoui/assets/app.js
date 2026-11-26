@@ -19,7 +19,10 @@ async function request(session, path, options = {}) {
   const response = await fetch(path, { ...options, headers, cache: "no-store" });
   if (!response.ok) {
     const problem = await response.json().catch(() => ({}));
-    throw new Error(`请求失败（${response.status}${problem.error ? ` · ${problem.error}` : ""}）`);
+    const error = new Error(`请求失败（${response.status}${problem.error ? ` · ${problem.error}` : ""}）`);
+    error.status = response.status;
+    error.code = problem.error;
+    throw error;
   }
   return response;
 }
@@ -132,6 +135,7 @@ async function update(session) {
   const gapLabel = gaps.length ? ` · 历史已过期 ${gaps.map((gap) => `${gap.from}–${gap.to}`).join("、")}` : "";
   byID("room-state").textContent = `会话 ${selected} · 设备游标 ${sync} · 已读 ${read.read_seq} · 未读 ${read.unread}${gapLabel}`;
   byID("add-member").hidden = room.kind !== "group";
+  byID("membership-tools").hidden = room.kind !== "group";
   byID("mark-read").disabled = !high || high <= read.read_seq;
   renderMessages(session, messages);
 }
@@ -157,9 +161,11 @@ function selectRoom(session, id) {
   if (session.selected !== id) {
     session.selected = id;
     session.high = 0;
-    session.draft = null;
-    byID("send").textContent = "发送";
     composer.reset();
+    renderPending(session);
+    const memberTools = byID("membership-tools");
+    memberTools.open = false;
+    resetMembershipTools();
     byID("messages").replaceChildren();
     byID("room-name").textContent = "正在同步";
     byID("room-state").textContent = "";
@@ -251,7 +257,7 @@ async function connect(session) {
 bindForm(login, async (data) => {
   const credentials = Object.fromEntries(data);
   const { token, session: profile } = await json(null, "/v1/sessions", "POST", credentials);
-  const session = { token, profile, selected: 0, high: 0 };
+  const session = { token, profile, selected: 0, high: 0, activeSends: new Set() };
   current = session;
   login.elements.password.value = "";
   byID("signin").hidden = true;
@@ -273,7 +279,6 @@ action(byID("logout"), async () => {
   byID("rooms").replaceChildren();
   byID("opened").hidden = true;
   byID("empty").hidden = false;
-  byID("send").textContent = "发送";
   composer.reset();
   connection.dataset.state = "off";
   connection.textContent = "未连接";
@@ -308,8 +313,131 @@ bindForm(group, async (data) => {
 const member = byID("add-member");
 bindForm(member, async (data) => {
   const session = current;
-  await json(session, `${base(session.selected)}/members/${idFrom(data.get("user_id"))}`, "PUT", { role: "member" });
-  if (current === session) member.reset();
+  const room = session.selected;
+  await json(session, `${base(room)}/members/${idFrom(data.get("user_id"))}`, "PUT", { role: "member" });
+  if (current === session && room === session.selected) {
+    member.reset();
+    if (byID("membership-tools").open) await loadMembershipOperations(session, room);
+  }
+});
+
+const memberTools = byID("membership-tools");
+const memberBatchForm = byID("membership-batch");
+const memberOperationList = byID("membership-operation-list");
+const olderMemberOperations = byID("older-membership-operations");
+
+function resetMembershipTools() {
+  byID("membership-content").hidden = true;
+  byID("membership-loading").textContent = "";
+  memberBatchForm.reset();
+  memberOperationList.replaceChildren();
+  olderMemberOperations.hidden = true;
+}
+
+function membershipToolsCurrent(session, room) {
+  return current === session && room === session.selected && memberTools.open;
+}
+
+async function loadMembershipOperations(session, room, before = 0) {
+  const loading = byID("membership-loading");
+  loading.textContent = "正在查询操作记录";
+  try {
+    const log = await json(session, `${base(room)}/membership-operations${before ? `?before=${before}` : ""}`);
+    if (!membershipToolsCurrent(session, room)) return;
+    if (!before) memberOperationList.replaceChildren();
+    memberOperationList.append(...log.items.map((operation) => renderMembershipOperation(session, room, operation)));
+    loading.textContent = memberOperationList.childElementCount ? "" : "暂无成员操作记录";
+    byID("membership-content").hidden = false;
+    olderMemberOperations.value = log.next_before || "";
+    olderMemberOperations.hidden = !log.next_before;
+  } catch (error) {
+    if (!membershipToolsCurrent(session, room)) return;
+    if (error.status === 404) byID("membership-content").hidden = true;
+    loading.textContent = error.status === 404 ? "当前设备账号没有群成员管理权限。" : error.message;
+  }
+}
+
+memberTools.addEventListener("toggle", () => {
+  if (memberTools.open && current) loadMembershipOperations(current, current.selected);
+});
+
+action(olderMemberOperations, () => loadMembershipOperations(current, current.selected, Number(olderMemberOperations.value)));
+
+function membershipChangeLabel(change) {
+  if (change.action === "remove") return "移除";
+  if (change.action === "transfer") return "设为群主";
+  return change.role === "admin" ? "设为管理员" : "设为成员";
+}
+
+function renderMembershipOperation(session, room, operation) {
+  const card = element("section", "", "membership-operation");
+  const roles = { owner: "群主", admin: "管理员", member: "成员" };
+  const ownBatch = operation.kind === "batch" && session.profile.user_id === operation.actor_id;
+  card.append(element("p", `#${operation.id} · 版本 ${operation.version} · ${roles[operation.actor_role]} ${operation.actor_id} · 设备 ${operation.device_id} · ${new Date(operation.completed_at || operation.created_at).toLocaleString()}`));
+  const rows = element("ul", "");
+  const failed = [];
+  for (const { status, reason, ...change } of operation.items) {
+    const state = { not_started: "未开始", failed: "失败", succeeded: "成功" }[status];
+    const detail = reason === "forbidden" ? "（权限或群角色限制）" : reason === "not_found" ? "（当前应用或群组内找不到用户）" : "";
+    const label = `用户 ${change.user_id} · ${membershipChangeLabel(change)} · ${state}${detail}`;
+    const row = element("li", "", status === "failed" ? "member-failed" : "");
+    if (status === "failed") {
+      const checkbox = element("input", "");
+      checkbox.type = "checkbox";
+      const wrapper = element("label", "");
+      wrapper.append(checkbox, document.createTextNode(label));
+      row.append(wrapper);
+      failed.push({ checkbox, change });
+    } else {
+      row.textContent = label;
+    }
+    rows.append(row);
+  }
+  card.append(rows);
+  if (ownBatch && operation.version === 1) {
+    const button = element("button", "执行此批次");
+    action(button, async () => {
+      const endpoint = `${base(room)}/membership-batches/${operation.client_id}`;
+      const receipt = await json(session, endpoint);
+      if (receipt.version === 1) await json(session, `${endpoint}/execute`, "POST");
+      if (membershipToolsCurrent(session, room)) await loadMembershipOperations(session, room);
+    });
+    card.append(button);
+  }
+  if (failed.length) {
+    const button = element("button", "用勾选的失败项创建新批次");
+    action(button, async () => {
+      const items = failed.filter(({ checkbox }) => checkbox.checked).map(({ change }) => change);
+      if (!items.length) throw new Error("请勾选要重试的失败项。");
+      await prepareMembershipBatch(session, room, items);
+    });
+    card.append(button);
+  }
+  return card;
+}
+
+async function prepareMembershipBatch(session, room, items) {
+  const { tenant_id, app_id, user_id } = session.profile;
+  const key = `messaging:membership-batch:${tenant_id}:${app_id}:${user_id}:${room}`;
+  const saved = JSON.parse(sessionStorage.getItem(key));
+  const draft = saved && JSON.stringify(saved.items) === JSON.stringify(items) ? saved : { client_id: crypto.randomUUID(), items };
+  sessionStorage.setItem(key, JSON.stringify(draft));
+  await json(session, `${base(room)}/membership-batches`, "POST", draft);
+  if (JSON.parse(sessionStorage.getItem(key))?.client_id === draft.client_id) sessionStorage.removeItem(key);
+  if (membershipToolsCurrent(session, room)) {
+    memberBatchForm.reset();
+    await loadMembershipOperations(session, room);
+  }
+}
+
+bindForm(memberBatchForm, async (data) => {
+  const values = data.get("users").trim().split(/[\s,，]+/);
+  if (values.length > 30 || values.some((value) => !/^[0-9]+$/.test(value))) throw new Error("每批请输入 1 至 30 个用户 ID。");
+  const users = values.map(idFrom);
+  if (new Set(users).size !== users.length) throw new Error("同一批次不能重复选择用户。");
+  const operation = data.get("operation");
+  const items = users.map((user_id) => operation === "remove" ? { user_id, action: "remove" } : { user_id, action: "set", role: operation });
+  await prepareMembershipBatch(current, current.selected, items);
 });
 
 action(byID("mark-read"), async () => {
@@ -329,27 +457,100 @@ async function upload(session, file) {
   return attachment.id;
 }
 
-bindForm(composer, async (data) => {
-  const session = current;
-  const conversation = session.selected;
-  const body = data.get("body");
-  const file = data.get("file");
-  if (!body.trim() && !file.name) throw new Error("请输入消息或选择附件。");
-  if (!session.draft) session.draft = { client_id: crypto.randomUUID(), body };
-  const draft = session.draft;
-  if (file.name && !draft.attachment_ids) draft.attachment_ids = [await upload(session, file)];
-  if (current !== session || session.selected !== conversation || session.draft !== draft) return;
-  byID("send").textContent = "重试发送";
-  await json(session, `${base(conversation)}/messages`, "POST", draft);
-  if (current !== session || session.selected !== conversation || session.draft !== draft) return;
-  session.draft = null;
-  composer.reset();
-  byID("send").textContent = "发送";
-  feedback("已落库");
-  await refresh(session);
-});
+function pendingKey(session, conversation) {
+  const { tenant_id, app_id, user_id, device_id } = session.profile;
+  return `messaging:pending:${tenant_id}:${app_id}:${user_id}:${device_id}:${conversation}`;
+}
 
-composer.addEventListener("input", () => {
-  if (current) current.draft = null;
-  byID("send").textContent = "发送";
-});
+function pendingMessage(session, conversation) {
+  return JSON.parse(sessionStorage.getItem(pendingKey(session, conversation)));
+}
+
+function renderPending(session) {
+  const draft = pendingMessage(session, session.selected);
+  const busy = session.activeSends.has(session.selected);
+  const status = byID("send-status");
+  status.hidden = byID("check-send").hidden = byID("clear-send").hidden = !draft;
+  composer.elements.body.readOnly = Boolean(draft) || busy;
+  composer.elements.file.disabled = Boolean(draft) || busy;
+  byID("check-send").disabled = byID("clear-send").disabled = byID("send").disabled = busy;
+  byID("send").textContent = draft ? "重试发送" : "发送";
+  if (draft) {
+    composer.elements.body.value = draft.body;
+    status.textContent = `等待确认 · ${draft.client_id}`;
+  }
+}
+
+function messageAction(task) {
+  return async (data) => {
+    const session = current;
+    const conversation = session.selected;
+    if (session.activeSends.has(conversation)) return;
+    session.activeSends.add(conversation);
+    try {
+      renderPending(session);
+      await task(session, conversation, pendingMessage(session, conversation), data);
+    } catch (error) {
+      if (current === session && session.selected === conversation) throw error;
+    } finally {
+      session.activeSends.delete(conversation);
+      if (current === session && session.selected === conversation) renderPending(session);
+    }
+  };
+}
+
+function samePending(session, conversation, draft) {
+  return pendingMessage(session, conversation)?.client_id === draft.client_id;
+}
+
+async function settlePending(session, conversation, draft, message) {
+  if (!samePending(session, conversation, draft)) return;
+  sessionStorage.removeItem(pendingKey(session, conversation));
+  if (current !== session || session.selected !== conversation) return;
+  composer.reset();
+  renderPending(session);
+  feedback(message ? `已落库 · #${message.seq}` : "已放弃待确认发送");
+  if (message) await refresh(session);
+}
+
+async function recoverPending(session, conversation, draft) {
+  const url = `${base(conversation)}/messages/by-client/${encodeURIComponent(draft.client_id)}`;
+  try {
+    const message = await json(session, url);
+    await settlePending(session, conversation, draft, message);
+    return true;
+  } catch (error) {
+    if (error.status === 404 && error.code === "not_found") return false;
+    throw error;
+  }
+}
+
+action(byID("check-send"), messageAction(async (session, conversation, draft) => {
+  if (draft && !await recoverPending(session, conversation, draft) && current === session
+      && session.selected === conversation && samePending(session, conversation, draft)) {
+    feedback("尚未查到持久回执，可用原消息号重试。");
+  }
+}));
+
+action(byID("clear-send"), messageAction(async (session, conversation, draft) => {
+  if (draft && !await recoverPending(session, conversation, draft)) {
+    await settlePending(session, conversation, draft, null);
+  }
+}));
+
+bindForm(composer, messageAction(async (session, conversation, draft, data) => {
+  if (draft) {
+    if (await recoverPending(session, conversation, draft) || !samePending(session, conversation, draft)) return;
+  } else {
+    const body = data.get("body");
+    const file = data.get("file");
+    if (!body.trim() && !file.name) throw new Error("请输入消息或选择附件。");
+    draft = { client_id: crypto.randomUUID(), body };
+    if (file.name) draft.attachment_ids = [await upload(session, file)];
+    if (current !== session || session.selected !== conversation) return;
+    sessionStorage.setItem(pendingKey(session, conversation), JSON.stringify(draft));
+    renderPending(session);
+  }
+  const receipt = await json(session, `${base(conversation)}/messages`, "POST", draft);
+  await settlePending(session, conversation, draft, receipt.message);
+}));

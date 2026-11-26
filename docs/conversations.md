@@ -16,6 +16,31 @@
 
 `since_join` 策略从入群后的下一条消息起开放历史。退群时冻结可见上界，重新入群产生新的区间。`all` 策略在每次入群时从序号 1 开放历史，退群时同样冻结上界。群主需要先移交群主角色才能退群。成员和会话列表用 `after` 传入上页响应的 `next_after`。
 
+## 群成员批次与操作记录
+
+表中的路径接在 `/v1/conversations/{id}` 后。批次仅向当前群主和管理员开放，实际执行权限在事务内从登录设备和当前群角色重新检查。
+
+| 请求 | 数据与结果 |
+|---|---|
+| `POST /membership-batches` | 保存 1 至 30 个不同用户的有序操作。响应包含批次 `id`、会话 ID、操作者、设备、群角色、版本和逐项结果。初次保存返回版本 1，各项为 `not_started`。 |
+| `GET /membership-batches/{client_id}` | 批次建立者在自己的任一授权设备上查原批次。 |
+| `POST /membership-batches/{client_id}/execute` | 批次建立者执行已保存选集。响应为版本 2，各项为 `succeeded` 或 `failed`。失败原因包含 `forbidden` 和 `not_found`。 |
+| `GET /membership-operations?before=123` | 当前群主和管理员按倒序读取本群操作记录。每页最多 20 条，用 `next_before` 读取更早的记录。首屏省略 `before`。 |
+
+```json
+{
+  "client_id": "shift-roster-0830",
+  "items": [
+    {"user_id": 24, "action": "set", "role": "member"},
+    {"user_id": 30, "action": "remove"}
+  ]
+}
+```
+
+同一群、同一账号的 `client_id` 对应同一份选集。相同重放读回原批次，改动选集或顺序返回 `409 client_id_payload_conflict`。执行时业务拒绝记录在该项，其余合法变更一并提交。事务失败时，整次变更回滚，查回的批次仍为版本 1。若执行回执丢失，先查询原标识，只有仍为版本 1 才需要执行。要重新尝试部分失败项，用新 `client_id` 保存新选集。
+
+批次中对自己的变更会被拒绝。角色变更、退群和群主转让继续使用原接口，并在同一事务中记录实际操作者。旧版本的成员历史仍可用，从 schema 7 启用后开始积累操作记录。
+
 ## 发送与查阅文本消息
 
 通过 `POST /v1/conversations/{id}/messages` 发送 `{"client_id":"desk-853","body":"桥吊已经就位"}`。`client_id` 由发送方生成，在同一发送账号和设备的所有会话中唯一。正文上限为 4000 UTF-8 字节。首次写入返回 `201`，对同一会话发送相同载荷时，重试返回 `200` 且 `duplicate` 为 `true`。同标识改正文或会话会返回 `409 client_id_payload_conflict`。

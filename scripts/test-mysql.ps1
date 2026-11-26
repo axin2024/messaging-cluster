@@ -86,6 +86,20 @@ function Test-FixtureRestore($SourceProcess, $Sender, [string]$AdminToken) {
         $grantPath = "$path/messages/1/attachments/$($attachment.id)/grants"
         Assert-FixtureAttachment $peerOrigin $grantPath $readerHeaders "$fixtureRoot/download-before.bin" $digest
 
+        $group = Invoke-RestMethod "$origin/v1/conversations/group" -Method Post -ContentType 'application/json' -Headers $senderHeaders -Body '{"title":"Recovery shift","history_policy":"since_join"}'
+        $groupPath = "/v1/conversations/$($group.id)"
+        $batchPath = "$groupPath/membership-batches"
+        $selection = @{ client_id = 'restore-roster'; items = @(
+            @{ user_id = $reader.session.user_id; action = 'set'; role = 'member' },
+            @{ user_id = $Sender.session.user_id; action = 'remove' }
+        ) } | ConvertTo-Json -Depth 5
+        $batch = Invoke-RestMethod "$origin$batchPath" -Method Post -ContentType 'application/json' -Headers $senderHeaders -Body $selection
+        $completed = Invoke-RestMethod "$peerOrigin$batchPath/restore-roster/execute" -Method Post -Headers $senderHeaders
+        if ($completed.id -ne $batch.id -or $completed.items[0].status -ne 'succeeded' -or $completed.items[1].reason -ne 'forbidden') { throw 'Expected a partial group roster receipt' }
+        $removal = @{ client_id = 'restore-pending'; items = @(@{ user_id = $reader.session.user_id; action = 'remove' }) } | ConvertTo-Json -Depth 5
+        $pending = Invoke-RestMethod "$origin$batchPath" -Method Post -ContentType 'application/json' -Headers $senderHeaders -Body $removal
+        if ($pending.version -ne 1 -or $pending.items[0].status -ne 'not_started') { throw 'Expected an unstarted group roster receipt' }
+
         Stop-FixtureProcess $SourceProcess
         Stop-FixtureProcess $peer
         $dump = "$fixtureRoot/messaging.sql"
@@ -118,7 +132,22 @@ function Test-FixtureRestore($SourceProcess, $Sender, [string]$AdminToken) {
         Assert-FixtureAttachment $peerOrigin $grantPath $readerHeaders "$fixtureRoot/download-after.bin" $digest
         $continued = Invoke-RestMethod "$peerOrigin$path/messages" -Method Post -ContentType 'application/json' -Headers $senderHeaders -Body '{"client_id":"restored-write","body":"Next dispatch"}'
         if ($continued.message.seq -ne 2) { throw 'Restored conversation did not continue at sequence 2' }
-        Write-Output "Two standalone gateways and isolated restore passed: message seq 1, sync/read seq 1, attachment SHA-256 $digest, next write seq 2."
+        $saved = Invoke-RestMethod "$peerOrigin$batchPath/restore-roster" -Headers $senderHeaders
+        $replay = Invoke-RestMethod "$peerOrigin$batchPath/restore-roster/execute" -Method Post -Headers $senderHeaders
+        $unstarted = Invoke-RestMethod "$peerOrigin$batchPath/restore-pending" -Headers $senderHeaders
+        if (($saved | ConvertTo-Json -Depth 6 -Compress) -ne ($completed | ConvertTo-Json -Depth 6 -Compress) -or
+            ($saved | ConvertTo-Json -Depth 6 -Compress) -ne ($replay | ConvertTo-Json -Depth 6 -Compress) -or
+            $unstarted.id -ne $pending.id -or $unstarted.version -ne 1 -or $unstarted.items[0].status -ne 'not_started') {
+            throw 'Restored membership operation differs from its committed receipt'
+        }
+        $resumed = Invoke-RestMethod "$peerOrigin$batchPath/restore-pending/execute" -Method Post -Headers $senderHeaders
+        $members = Invoke-RestMethod "$peerOrigin$groupPath/members" -Headers $senderHeaders
+        $audit = Invoke-RestMethod "$peerOrigin$groupPath/membership-operations" -Headers $senderHeaders
+        if ($resumed.id -ne $pending.id -or $resumed.version -ne 2 -or $resumed.items[0].status -ne 'succeeded' -or
+            $members.items.Count -ne 1 -or $members.items[0].user_id -ne $Sender.session.user_id -or $audit.items.Count -ne 2) {
+            throw 'Restored group roster produced extra changes or failed to resume'
+        }
+        Write-Output "Two standalone gateways and isolated restore passed: message seq 1, sync/read seq 1, attachment SHA-256 $digest, next write seq 2, partial and unstarted group batches preserved."
     } finally {
         Stop-FixtureProcess $recovered
         Stop-FixtureProcess $peer
@@ -184,7 +213,7 @@ GRANT ALL PRIVILEGES ON $dbName.* TO 'messaging_test'@'127.0.0.1';
     if ($PreviousBinary) {
         $oldVersion = & $PreviousBinary migrate | ConvertFrom-Json
         Assert-Exit 'previous migration'
-        if ($oldVersion.schema_version -ne 5) { throw 'Expected a previous binary using schema version 5' }
+        if ($oldVersion.schema_version -notin @(5, 6)) { throw 'Expected a previous binary using schema version 5 or 6' }
         $oldApp = & $PreviousBinary create-app upgrade dispatch | ConvertFrom-Json
         Assert-Exit 'previous application bootstrap'
         $appProcess = Start-Process -FilePath $PreviousBinary -ArgumentList 'serve' -PassThru -WindowStyle Hidden -RedirectStandardError "$fixtureRoot/previous.log"
@@ -199,11 +228,14 @@ GRANT ALL PRIVILEGES ON $dbName.* TO 'messaging_test'@'127.0.0.1';
         $oldPayload = @{ client_id = 'before-upgrade'; body = 'first dispatch' } | ConvertTo-Json
         $oldReceipt = Invoke-RestMethod "$oldPath/messages" -Method Post -Headers $senderHeaders -ContentType 'application/json' -Body $oldPayload
         if ($oldReceipt.message.seq -ne 1) { throw 'Previous service did not write sequence 1' }
+        $oldGroup = Invoke-RestMethod "$origin/v1/conversations/group" -Method Post -Headers $senderHeaders -ContentType 'application/json' -Body '{"title":"Legacy roster","history_policy":"since_join"}'
+        $oldGroupPath = "$origin/v1/conversations/$($oldGroup.id)"
+        Invoke-RestMethod "$oldGroupPath/members/$($oldRecipient.session.user_id)" -Method Put -Headers $senderHeaders -ContentType 'application/json' -Body '{"role":"member"}' | Out-Null
         Stop-Process -Id $appProcess.Id
         $appProcess.WaitForExit(5000) | Out-Null
         if (!$appProcess.HasExited) { throw 'Previous service did not stop' }
-        & $binary migrate
-        Assert-Exit 'migration from schema 5'
+        $migrated = & $binary migrate | ConvertFrom-Json
+        Assert-Exit "migration from schema $($oldVersion.schema_version)"
     }
     if ($env:MESSAGING_CAPACITY_TEST -eq 'full') {
         go test -count=1 -timeout 20m -json ./... | ForEach-Object {
@@ -226,7 +258,8 @@ GRANT ALL PRIVILEGES ON $dbName.* TO 'messaging_test'@'127.0.0.1';
     if (!$me.user_id -or $me.user_id -ne $session.session.user_id -or $me.device_key -ne 'desk') { throw 'Live credential readback mismatch' }
     if ($PreviousBinary) {
         $timeline = Invoke-RestMethod "$origin/v1/admin/conversations/$($oldChat.id)/messages/1/delivery" -Headers @{ Authorization = 'Bearer ' + $oldApp.admin_token }
-        if ($timeline.live_delivery -ne $false -or $timeline.seq -ne 1 -or $timeline.dispatched_at) { throw 'Previous message was incorrectly enqueued for live delivery' }
+        if ($timeline.seq -ne 1 -or ($oldVersion.schema_version -eq 5 -and ($timeline.live_delivery -ne $false -or $timeline.dispatched_at)) -or
+            ($oldVersion.schema_version -eq 6 -and $timeline.live_delivery -ne $true)) { throw 'Previous message delivery metadata differs after upgrade' }
         $replayed = Invoke-RestMethod "$oldPath/messages" -Method Post -Headers $senderHeaders -ContentType 'application/json' -Body $oldPayload
         if (!$replayed.duplicate -or $replayed.message.seq -ne 1) { throw 'Previous idempotency key failed after upgrade' }
         $newPayload = @{ client_id = 'after-upgrade'; body = 'second dispatch' } | ConvertTo-Json
@@ -235,7 +268,15 @@ GRANT ALL PRIVILEGES ON $dbName.* TO 'messaging_test'@'127.0.0.1';
         if ($newReceipt.message.seq -ne 2 -or $history.items.Count -ne 2 -or $history.items[0].body -ne 'first dispatch' -or $history.items[1].body -ne 'second dispatch') {
             throw 'The upgraded service did not preserve history and sequence'
         }
-        Write-Output 'Schema 5 to 6 preserved the original session, message, idempotency key, and next sequence.'
+        $legacyMembers = Invoke-RestMethod "$oldGroupPath/members" -Headers $recipientHeaders
+        $legacyAudit = Invoke-RestMethod "$oldGroupPath/membership-operations" -Headers $senderHeaders
+        if ($legacyMembers.items.Count -ne 2 -or $legacyAudit.items.Count -ne 0) { throw 'Historical memberships were lost or synthetic audit was produced during upgrade' }
+        Invoke-RestMethod "$oldGroupPath/members/$($oldRecipient.session.user_id)" -Method Put -Headers $senderHeaders -ContentType 'application/json' -Body '{"role":"admin"}' | Out-Null
+        $newAudit = Invoke-RestMethod "$oldGroupPath/membership-operations" -Headers $senderHeaders
+        if ($newAudit.items.Count -ne 1 -or $newAudit.items[0].actor_id -ne $oldSender.session.user_id -or $newAudit.items[0].items[0].role -ne 'admin') {
+            throw 'New operation on a historical group was not audited'
+        }
+        Write-Output "Schema $($oldVersion.schema_version) to $($migrated.schema_version) preserved the original session, message, idempotency key, next sequence, and historical group memberships."
     }
     Write-Output 'CLI migration, app bootstrap, standalone HTTP readiness, login, and bearer readback passed.'
     if ($VerifyRestore) { Test-FixtureRestore $appProcess $session $app.admin_token }

@@ -47,11 +47,27 @@
             <label class="sr-only" for="member">成员用户 ID</label><input id="member" name="user_id" inputmode="numeric" pattern="[0-9]+" placeholder="成员用户 ID" required>
             <button type="submit">添加成员</button>
           </form>
+          <details id="membership-tools" class="membership-tools" hidden>
+            <summary>批量成员与操作记录</summary>
+            <p id="membership-loading" role="status"></p>
+            <div id="membership-content" hidden>
+              <form id="membership-batch" class="inline-form">
+                <label>操作<select name="operation"><option value="member">设为成员</option><option value="admin">设为管理员</option><option value="remove">移除成员</option></select></label>
+                <label>用户 ID<input name="users" placeholder="用逗号或空格分隔" required></label>
+                <button type="submit">保存待执行批次</button>
+              </form>
+              <div id="membership-operation-list" class="membership-operation-list"></div>
+              <button id="older-membership-operations" type="button" hidden>更早的操作</button>
+            </div>
+          </details>
           <ol id="messages" class="messages" aria-label="消息记录" aria-live="polite"></ol>
           <form id="composer" class="composer">
             <label class="sr-only" for="body">输入消息</label><textarea id="body" name="body" rows="2" placeholder="输入消息"></textarea>
+            <p id="send-status" role="status" hidden></p>
             <div class="composer-actions">
               <label class="upload">附件<input name="file" type="file"></label>
+              <button id="check-send" type="button" hidden>查单</button>
+              <button id="clear-send" type="button" hidden>放弃待确认发送</button>
               <button class="primary" type="submit" id="send">发送</button>
             </div>
           </form>

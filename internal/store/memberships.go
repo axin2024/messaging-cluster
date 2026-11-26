@@ -57,12 +57,24 @@ func (s *Store) SetMember(ctx context.Context, session Session, id, user uint64,
 	if err != nil {
 		return Membership{}, err
 	}
+	member, err := setMember(ctx, tx, session.Scope, conversation, actor, user, role)
+	if err != nil {
+		return Membership{}, err
+	}
+	if err := recordMembershipChange(ctx, tx, session, conversation, actor, MembershipChange{UserID: user, Action: "set", Role: role}); err != nil {
+		return Membership{}, err
+	}
+	return member, tx.Commit()
+}
+
+func setMember(ctx context.Context, tx *sql.Tx, scope Scope, conversation Conversation, actor Membership, user uint64, role string) (Membership, error) {
 	if actor.Role == "member" || (actor.Role == "admin" && role != "member") {
 		return Membership{}, ErrForbidden
 	}
-	if err := scopedUser(ctx, tx, session.Scope, user); err != nil {
+	if err := scopedUser(ctx, tx, scope, user); err != nil {
 		return Membership{}, err
 	}
+	id := conversation.ID
 	target, err := activeMember(ctx, tx, id, user)
 	switch {
 	case errors.Is(err, ErrForbidden):
@@ -72,10 +84,10 @@ func (s *Store) SetMember(ctx context.Context, session Session, id, user uint64,
 			from = conversation.lastSeq + 1
 			high = 0
 		}
-		if err := insertMember(ctx, tx, session.Scope, id, user, role, from); err != nil {
+		if err := insertMember(ctx, tx, scope, id, user, role, from); err != nil {
 			return Membership{}, err
 		}
-		if err := upsertInbox(ctx, tx, session.Scope, user, id, high); err != nil {
+		if err := upsertInbox(ctx, tx, scope, user, id, high); err != nil {
 			return Membership{}, err
 		}
 	case err != nil:
@@ -87,11 +99,7 @@ func (s *Store) SetMember(ctx context.Context, session Session, id, user uint64,
 			return Membership{}, err
 		}
 	}
-	member, err := activeMember(ctx, tx, id, user)
-	if err != nil {
-		return Membership{}, err
-	}
-	return member, tx.Commit()
+	return activeMember(ctx, tx, id, user)
 }
 
 func (s *Store) RemoveMember(ctx context.Context, session Session, id, user uint64) error {
@@ -104,10 +112,20 @@ func (s *Store) RemoveMember(ctx context.Context, session Session, id, user uint
 	if err != nil {
 		return err
 	}
+	if err := removeMember(ctx, tx, conversation, actor, user); err != nil {
+		return err
+	}
+	if err := recordMembershipChange(ctx, tx, session, conversation, actor, MembershipChange{UserID: user, Action: "remove"}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func removeMember(ctx context.Context, tx *sql.Tx, conversation Conversation, actor Membership, user uint64) error {
 	if user != actor.UserID && actor.Role == "member" {
 		return ErrForbidden
 	}
-	target, err := activeMember(ctx, tx, id, user)
+	target, err := activeMember(ctx, tx, conversation.ID, user)
 	if errors.Is(err, ErrForbidden) {
 		return ErrNotFound
 	}
@@ -117,11 +135,9 @@ func (s *Store) RemoveMember(ctx context.Context, session Session, id, user uint
 	if target.Role == "owner" || (target.Role == "admin" && target.UserID != actor.UserID && actor.Role != "owner") {
 		return ErrForbidden
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE memberships SET to_seq = ?, left_at = UTC_TIMESTAMP(6) WHERE id = ?`,
-		conversation.lastSeq, target.id); err != nil {
-		return err
-	}
-	return tx.Commit()
+	_, err = tx.ExecContext(ctx, `UPDATE memberships SET to_seq = ?, left_at = UTC_TIMESTAMP(6) WHERE id = ?`,
+		conversation.lastSeq, target.id)
+	return err
 }
 
 func (s *Store) TransferGroup(ctx context.Context, session Session, id, user uint64) error {
@@ -130,7 +146,7 @@ func (s *Store) TransferGroup(ctx context.Context, session Session, id, user uin
 		return err
 	}
 	defer tx.Rollback()
-	_, actor, err := lockGroup(ctx, tx, session, id)
+	conversation, actor, err := lockGroup(ctx, tx, session, id)
 	if err != nil {
 		return err
 	}
@@ -145,6 +161,9 @@ func (s *Store) TransferGroup(ctx context.Context, session Session, id, user uin
 		return err
 	}
 	if err := changeRole(ctx, tx, target.id, "owner"); err != nil {
+		return err
+	}
+	if err := recordMembershipChange(ctx, tx, session, conversation, actor, MembershipChange{UserID: user, Action: "transfer", Role: "owner"}); err != nil {
 		return err
 	}
 	return tx.Commit()
