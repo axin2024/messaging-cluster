@@ -6,6 +6,8 @@ Messaging Cluster 是用 Go 和 MySQL 构建的自托管即时通信服务，包
 
 群主和管理员可以保存成员变更计划、逐项查看执行结果，并从操作记录追溯执行账号、设备和角色。消息台在回执中断时保留原消息标识，可以在当前标签页恢复后查单或重试。
 
+跨组织协作空间用于采购、外包和联合交付。两边的管理员分别签认合作范围、管理本方成员和导出本方记录。项目成员在共享频道讨论、引用、检索和交换附件。撤权提交后，旧设备游标、搜索和附件凭证会重新校验。
+
 ## 运行服务
 
 准备 Go 1.26 和 MySQL 8.4。在 MySQL 中先建空库和该库的应用账号。设置 `MESSAGING_MYSQL_DSN` 为 MySQL 驱动的连接字符串，`MESSAGING_HTTP_ADDR` 默认为 `127.0.0.1:8080`。公开环境使用 HTTPS，数据库跨主机访问时按部署环境配置 TLS。
@@ -21,6 +23,8 @@ go run ./cmd/messaging serve
 用不同的 `MESSAGING_NODE_NAME` 和 `MESSAGING_HTTP_ADDR` 启动第二个进程。两个进程使用同一个 `MESSAGING_MYSQL_DSN`，并将 `MESSAGING_ATTACHMENT_DIR` 指向同一个私有存储卷。单节点的附件目录默认为 `storage/attachments`。
 
 [部署配置、升级与备份恢复](docs/deployment.md) · [三账号双网关演示](docs/demo.md)
+
+[跨组织协作工作台与 API](docs/shared-projects.md) · [2.0 验收与复现](docs/shared-acceptance.md)
 
 [身份与设备 API](docs/identity.md) · [长连接网关](docs/gateway.md) · [会话与消息 API](docs/conversations.md) · [离线同步与已读](docs/sync.md) · [附件与撤回](docs/media.md) · [限流与诊断](docs/operations.md) · [Apache License 2.0](LICENSE)
 

@@ -74,9 +74,36 @@ func Start(ctx context.Context, storage *store.Store, name string, config Config
 	g := &Gateway{store: storage, node: node, config: config, logger: logger, cancel: cancel,
 		done: make(chan struct{}), deliveryDone: make(chan struct{}), peers: make(map[uint64]*peer)}
 	g.ready.Store(true)
+	g.wait.Add(1)
+	go g.maintainSharedData(lifetime)
 	go g.deliver(lifetime)
 	go g.maintain(lifetime)
 	return g, nil
+}
+
+func (g *Gateway) maintainSharedData(ctx context.Context) {
+	defer g.wait.Done()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			prune, cancel := context.WithTimeout(ctx, 2*time.Second)
+			err := g.store.PruneSharedIndex(prune)
+			cancel()
+			if err != nil && ctx.Err() == nil {
+				g.logger.Warn("could not prune shared search entries", "node", g.node.ID, "error", err)
+			}
+			work, cancel := context.WithTimeout(ctx, 2*time.Second)
+			err = g.store.ProcessSharedExports(work)
+			cancel()
+			if err != nil && ctx.Err() == nil {
+				g.logger.Warn("could not process shared exports", "node", g.node.ID, "error", err)
+			}
+		}
+	}
 }
 
 func (g *Gateway) Done() <-chan struct{} { return g.done }
@@ -164,6 +191,9 @@ func (g *Gateway) maintain(ctx context.Context) {
 			}
 			if err := g.store.PruneSendBuckets(prune); err != nil && ctx.Err() == nil {
 				g.logger.Warn("could not prune message rate counters", "node", g.node.ID, "error", err)
+			}
+			if err := g.store.PruneSharedExports(prune); err != nil && ctx.Err() == nil {
+				g.logger.Warn("could not prune shared exports", "node", g.node.ID, "error", err)
 			}
 			cancel()
 			nextPrune = time.Now().Add(time.Minute)

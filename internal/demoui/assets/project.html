@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>跨组织协作 · Messaging Cluster</title>
+  <link rel="stylesheet" href="./project.css">
+  <script type="module" src="./project.js"></script>
+</head>
+<body>
+  <header class="top">
+    <a href="./" class="brand">Messaging Cluster</a>
+    <nav aria-label="工作台"><a href="./">消息台</a><a href="./project.html" aria-current="page">跨组织协作</a></nav>
+  </header>
+  <main>
+    <header class="heading">
+      <div><h1>跨组织协作</h1><p>在采购方与供应商之间共享项目资料、消息和讨论。</p></div>
+      <div class="switcher" role="group" aria-label="身份类型">
+        <button type="button" id="member-mode" aria-pressed="true">项目成员</button>
+        <button type="button" id="admin-mode" aria-pressed="false">组织管理员</button>
+      </div>
+    </header>
+    <div id="feedback" role="status" aria-live="polite"></div>
+    <section id="member-view">
+      <form id="member-login" class="panel login" autocomplete="off">
+        <h2>登录项目设备</h2>
+        <div class="fields">
+          <label>组织键<input name="tenant" required></label>
+          <label>应用键<input name="app" value="dispatch" required></label>
+          <label>用户名<input name="username" autocomplete="username" required></label>
+          <label>设备键<input name="device_key" value="project-web" required></label>
+          <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+        </div>
+        <button type="submit" class="primary">登录</button>
+      </form>
+      <div id="member-workspace" class="layout" hidden>
+        <aside class="panel sidebar">
+          <div class="bar"><h2>我的项目</h2><button type="button" id="member-refresh">重新连接</button></div>
+          <p id="member-identity" class="muted"></p>
+          <div id="member-links" class="list"></div>
+          <h3>频道</h3><div id="member-channels" class="list"></div>
+          <button type="button" id="member-logout">退出设备</button>
+        </aside>
+        <section class="panel content">
+          <div class="bar"><h2 id="member-heading">选择一个项目</h2><small id="authority"></small></div>
+          <form id="search" class="inline" hidden>
+            <label class="grow">项目搜索<input name="q" maxlength="128" placeholder="输入消息关键词" required></label>
+            <button type="submit">搜索</button>
+          </form>
+          <section id="search-results" hidden aria-label="搜索结果"><div id="search-list" class="list"></div><button type="button" id="search-more" hidden>更多结果</button></section>
+          <div id="member-channel" hidden>
+            <div class="bar section-title"><h3 id="channel-title"></h3><div class="actions"><button type="button" id="mentions-refresh">我的提醒</button><button type="button" id="timeline-refresh">更新消息</button></div></div>
+            <section id="mentions" class="list" aria-label="提醒" hidden></section>
+            <ol id="timeline" class="timeline" aria-label="频道消息"></ol>
+            <button type="button" id="timeline-more" hidden>加载更多消息</button>
+            <section id="thread" class="thread" aria-label="讨论线程" hidden>
+              <div class="bar"><h3 id="thread-title"></h3><button type="button" id="thread-close">返回频道</button></div>
+              <ol id="thread-messages" class="timeline"></ol>
+              <button type="button" id="thread-more" hidden>加载更多回复</button>
+            </section>
+            <form id="compose" class="compose">
+              <div class="bar"><label for="message-body" id="compose-title">新消息</label><button type="button" id="clear-reference" hidden>取消引用</button></div>
+              <textarea id="message-body" name="body" rows="3" maxlength="4000" placeholder="输入消息或添加附件"></textarea>
+              <p id="message-audience" class="muted"></p>
+              <details id="mention-controls"><summary>选择提醒对象</summary><div class="inline section-title"><label class="grow">组织范围<select name="mention_side"><option value="own">本组织</option><option value="partner">合作组织</option></select></label><label class="grow">筛选职责<input name="mention_role" maxlength="64" placeholder="如 dispatch"></label><button type="button" id="preview-mentions">预览对象</button></div><div id="mention-candidates" class="list"></div></details>
+              <div class="inline"><label class="grow">附件<input type="file" name="files" multiple></label><button type="submit" class="primary">发送</button></div>
+            </form>
+            <details id="legacy-tools" hidden><summary>发布普通群消息正文</summary>
+              <form id="legacy-publication" class="fields">
+                <label>原群 ID<input type="number" name="group_id" min="1" required></label>
+                <label>原群消息序号<input type="number" name="source_seq" min="1" required></label>
+                <button type="submit" value="preview">预览正文</button><button type="submit" value="publish" class="primary">发布到当前频道</button>
+                <p id="legacy-preview" class="proof wide" hidden></p>
+              </form>
+            </details>
+          </div>
+        </section>
+      </div>
+    </section>
+    <section id="admin-view" hidden>
+      <form id="admin-login" class="panel login" autocomplete="off">
+        <h2>连接组织管理端</h2>
+        <div class="fields"><label>应用管理员令牌<input name="token" type="password" required></label></div>
+        <button type="submit" class="primary">连接</button>
+      </form>
+      <div id="admin-workspace" class="layout" hidden>
+        <aside class="panel sidebar">
+          <div class="bar"><h2>合作关系</h2><button type="button" id="admin-refresh">刷新</button></div>
+          <div id="admin-links" class="list"></div>
+          <button type="button" id="admin-logout">断开管理端</button>
+        </aside>
+        <div class="stack">
+          <section class="panel content">
+            <h2>空间与邀请</h2>
+            <details><summary>创建空间</summary>
+              <form id="create-space" class="fields">
+                <label>空间键<input name="key" required maxlength="64"></label>
+                <label>名称<input name="title" required maxlength="160"></label>
+                <label class="wide">合作用途<textarea name="purpose" rows="2" maxlength="600" required></textarea></label>
+                <button type="submit" class="primary">创建空间</button>
+              </form>
+            </details>
+            <details><summary>邀请合作组织</summary>
+              <form id="invite" class="fields">
+                <label class="wide">我的空间<select name="space" id="invite-spaces" required></select></label>
+                <label>对方组织键<input name="peer_tenant" required></label>
+                <label>对方应用键<input name="peer_app" value="dispatch" required></label>
+                <label>访客席位<input name="seat_limit" type="number" value="5" min="1" max="10000" required></label>
+                <label>消息保留天数<input name="retention_days" type="number" value="30" min="0" max="3650" required></label>
+                <label>签认截止<input name="accept_before" type="datetime-local" required></label>
+                <label>合作到期<input name="expires_at" type="datetime-local" required></label>
+                <label class="check"><input name="thread" type="checkbox" checked>允许发布线程及消息</label>
+                <label class="check"><input name="history" type="checkbox">提出共享加入前的历史</label>
+                <button type="submit" class="primary">发送邀请</button>
+              </form>
+            </details>
+            <div class="bar section-title"><h3>收到的邀请</h3></div>
+            <div id="admin-invitations" class="list"></div>
+          </section>
+          <section id="admin-project" class="panel content" hidden>
+            <div class="bar"><div><h2 id="admin-heading"></h2><p id="admin-state" class="muted"></p></div><div id="state-actions" class="actions"></div></div>
+            <details id="channel-controls"><summary>新建项目频道</summary>
+              <form id="create-channel" class="fields">
+                <label>频道键<input name="key" maxlength="64" required></label>
+                <label>名称<input name="title" maxlength="160" required></label>
+                <label>可见范围<select name="audience"><option value="shared">两组织共享</option><option value="host">主持方内部</option></select></label>
+                <label>历史起点<select name="history_from"><option value="join">成员加入后</option><option value="beginning">频道最早处</option></select></label>
+                <p id="channel-preview" class="muted wide"></p>
+                <button type="submit" class="primary">创建频道</button>
+              </form>
+            </details>
+            <details open><summary>成员席位</summary>
+              <form id="change-grant" class="fields">
+                <label>用户 ID<input name="user" type="number" min="1" required></label>
+                <label>当前授权版本<input name="version" type="number" min="0" value="0" required></label>
+                <label>职责键<input name="role" value="member"></label>
+                <label>授权到期<input name="expiry" type="datetime-local"></label>
+                <button type="submit" name="operation" value="grant" class="primary">授予或更新</button>
+                <button type="submit" name="operation" value="revoke" class="danger">撤回授权</button>
+              </form>
+              <div id="admin-grants" class="list"></div>
+              <div id="grant-proof" class="proof" hidden></div>
+            </details>
+            <details open><summary>退出与归档</summary>
+              <div class="inline section-title"><button type="button" id="preview-export">预览本组织归档</button><button type="button" id="request-export" hidden>申请归档</button><button type="button" id="refresh-export" hidden>刷新回执</button><button type="button" id="download-export" hidden>下载归档</button><button type="button" id="export-next" hidden>申请下一段</button><button type="button" id="retry-export" hidden>重试</button></div>
+              <p id="export-preview" class="muted" hidden></p>
+              <div id="export-proof" class="proof" hidden></div>
+              <div class="bar section-title"><h3>审计记录</h3><button type="button" id="load-audit">刷新记录</button></div>
+              <ol id="audit" class="audit"></ol>
+            </details>
+          </section>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

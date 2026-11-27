@@ -166,6 +166,10 @@ func (s *Server) attachmentContent(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	s.serveAttachment(w, r, attachment)
+}
+
+func (s *Server) serveAttachment(w http.ResponseWriter, r *http.Request, attachment store.Attachment) {
 	content, err := s.blobs.Open(*attachment.ObjectKey, attachment.Size)
 	if err != nil {
 		s.logger.Error("attachment file unavailable", "attachment", attachment.ID, "error", err)

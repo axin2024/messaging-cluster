@@ -35,6 +35,7 @@ jobs:
           --health-retries=24
     env:
       MESSAGING_CAPACITY_TEST: ${{ inputs.full_capacity && 'full' || 'smoke' }}
+      MESSAGING_SHARED_CAPACITY_TEST: full
     steps:
       - uses: actions/checkout@v7
         with:
@@ -43,16 +44,26 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
       - name: Check Go and browser code
         run: |
           test -z "$(gofmt -l cmd internal)"
           go vet ./...
-          node --check internal/demoui/assets/app.js
+          for asset in internal/demoui/assets/*.js; do node --check "$asset"; done
+          node --check scripts/test-shared-workbench.mjs
+      - name: Install the browser for workbench acceptance
+        run: |
+          npm install --prefix "$RUNNER_TEMP/browser" --no-audit --no-fund playwright@1.65.0
+          "$RUNNER_TEMP/browser/node_modules/.bin/playwright" install --with-deps chromium
       - name: Run MySQL integration and capacity tests
         env:
           MYSQL_TEST_PORT: ${{ job.services.mysql.ports[3306] }}
+          MESSAGING_BROWSER_TEST: '1'
         run: |
           export MESSAGING_TEST_MYSQL_DSN="messaging_test:local-ci-only-password@tcp(127.0.0.1:$MYSQL_TEST_PORT)/messaging_test_ci"
+          export MESSAGING_PLAYWRIGHT_MODULE="$RUNNER_TEMP/browser/node_modules/playwright"
           go test -count=1 -timeout 20m -v ./...
       - name: Build the standalone binary
         run: go build -trimpath -o "$RUNNER_TEMP/messaging" ./cmd/messaging

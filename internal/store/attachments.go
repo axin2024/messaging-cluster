@@ -149,5 +149,9 @@ func (s *Store) RedeemAttachmentGrant(ctx context.Context, digest [32]byte) (Att
 
 func (s *Store) PruneAttachmentGrants(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM attachment_grants WHERE expires_at <= UTC_TIMESTAMP(6) ORDER BY expires_at LIMIT 2000`)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `DELETE FROM shared_attachment_grants WHERE expires_at <= UTC_TIMESTAMP(6) ORDER BY expires_at LIMIT 2000`)
 	return err
 }

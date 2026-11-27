@@ -39,7 +39,7 @@ func (s *Store) CreateApp(ctx context.Context, tenantKey, appKey string, digest 
 		return Scope{}, err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, "INSERT INTO tenants (tenant_key) VALUES (?) ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey)
+	_, err = tx.ExecContext(ctx, "INSERT INTO tenants (tenant_key,shared_enabled) VALUES (?,TRUE) ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey)
 	if err != nil {
 		return Scope{}, fmt.Errorf("ensure tenant: %w", err)
 	}

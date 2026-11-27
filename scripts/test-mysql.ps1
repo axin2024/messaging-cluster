@@ -55,6 +55,98 @@ function Assert-FixtureAttachment([string]$Origin, [string]$GrantPath, [hashtabl
     if ((Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash -ne $ExpectedHash) { throw 'Attachment digest mismatch' }
 }
 
+function Invoke-FixtureJson([string]$Url, [string]$Method, [hashtable]$Headers, $Body, [string]$Key = '') {
+    $requestHeaders = $Headers.Clone()
+    if ($Key) { $requestHeaders['Idempotency-Key'] = $Key }
+    Invoke-RestMethod $Url -Method $Method -Headers $requestHeaders -ContentType 'application/json' -Body ($Body | ConvertTo-Json -Depth 6 -Compress)
+}
+
+function New-SharedRestoreFixture([string]$PeerOrigin, $Sender, [string]$AdminToken, [uint64]$FileId) {
+    $partner = & $binary create-app supplier dispatch | ConvertFrom-Json
+    Assert-Exit 'create restore partner'
+    $hostAdmin = @{ Authorization = "Bearer $AdminToken" }
+    $peerAdmin = @{ Authorization = 'Bearer ' + $partner.admin_token }
+    $hostUser = @{ Authorization = 'Bearer ' + $Sender.token }
+    $guest = New-FixtureSession 'supplier' $partner.admin_token 'guest'
+    $guestUser = @{ Authorization = 'Bearer ' + $guest.token }
+
+    $space = Invoke-FixtureJson "$origin/v1/admin/shared-spaces" Post $hostAdmin @{ key = 'restore-project'; title = 'Dispatch contracts'; purpose = 'Restore rehearsal' }
+    $scope = @('project:read','thread:write')
+    $expires = [DateTimeOffset]::UtcNow.AddHours(2).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+    $offer = @{
+        peer_tenant = 'supplier'; peer_app = 'dispatch'; scope = $scope; seat_limit = 5; retention_days = 1
+        accept_before = [DateTimeOffset]::UtcNow.AddHours(1).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"); expires_at = $expires
+    }
+    $invite = Invoke-FixtureJson "$origin/v1/admin/shared-spaces/$($space.space_id)/invitations" Post $hostAdmin $offer 'restore-invite'
+    $consent = @{ invitation_id = $invite.invitation_id; policy_rev = $invite.policy_rev; scope = $scope; retention_days = 1 }
+    $link = Invoke-FixtureJson "$PeerOrigin/shared-spaces/$($space.space_id)/partners/$($partner.tenant_id)/accept" Post $peerAdmin $consent 'restore-consent'
+    $adminPath = "/v1/admin/partner-links/$($link.link_id)"
+    $channel = Invoke-FixtureJson "$origin$adminPath/channels" Post $hostAdmin @{ key = 'contracts'; title = 'Contracts'; audience = 'shared'; history_from = 'join' }
+    $channelPath = "/v1/shared-channels/$($channel.channel_id)/messages"
+    $setHost = @{ user_id = $Sender.session.user_id; expected_version = 0; duty_role = 'buyer'; expires_at = $expires }
+    $setGuest = @{ user_id = $guest.session.user_id; expected_version = 0; duty_role = 'dispatch'; expires_at = $expires }
+    Invoke-FixtureJson "$origin$adminPath/grants" Post $hostAdmin $setHost 'restore-host-grant' | Out-Null
+    $granted = Invoke-FixtureJson "$PeerOrigin$adminPath/grants" Post $peerAdmin $setGuest 'restore-guest-grant'
+    $root = Invoke-FixtureJson "$origin$channelPath" Post $hostUser @{ client_id = 'restore-root'; body = 'harbor recovery contract'; attachments = @($FileId) }
+    $removed = Invoke-FixtureJson "$origin$channelPath" Post $hostUser @{ client_id = 'restore-hide'; body = 'harbor recovery withdrawn' }
+    $guestHistory = Invoke-RestMethod "$PeerOrigin$channelPath" -Headers $guestUser
+    if ($root.seq -ne 1 -or $removed.seq -ne 2 -or $guestHistory.items.Count -ne 2) { throw 'Shared restore fixture messages missing' }
+    $grantPath = "$channelPath/1/attachments/$FileId/grant"
+    $stale = Invoke-RestMethod "$PeerOrigin$grantPath" -Method Post -Headers $guestUser
+    $revoke = @{ user_id = $guest.session.user_id; expected_version = $granted.grant_version; revoke = $true }
+    $revoked = Invoke-FixtureJson "$origin$adminPath/grants" Post $hostAdmin $revoke 'restore-revoke'
+    Invoke-RestMethod "$origin$adminPath/channels/$($channel.channel_id)/messages/2" -Method Delete -Headers $hostAdmin | Out-Null
+    $timeline = Invoke-RestMethod "$origin$channelPath" -Headers $hostUser
+    $job = Invoke-FixtureJson "$origin$adminPath/exports" Post $hostAdmin @{} 'restore-export'
+    $exportPath = "$adminPath/exports/$($job.export_id)"
+    for ($i = 0; $i -lt 31 -and $job.state -eq 'queued'; $i++) {
+        Start-Sleep -Milliseconds 250
+        $job = Invoke-RestMethod "$origin$exportPath" -Headers $hostAdmin
+    }
+    if ($job.state -ne 'ready' -or $job.item_count -ne 1) { throw 'Shared restore fixture did not archive its own visible message' }
+    @{
+        Admin = $hostAdmin; Host = $hostUser; Guest = $guestUser; AdminPath = $adminPath; MessagePath = $channelPath
+        Link = $link.link_id; GrantPath = $grantPath; OldPass = $stale.token; OldCursor = $guestHistory.cursor
+        HostCursor = $timeline.cursor; Epoch = $revoked.grant_epoch; ExportPath = $exportPath; Digest = $job.archive_digest
+    }
+}
+
+function Test-SharedRestoreFixture([string]$Origin, $Shared, [string]$FileDigest) {
+    $hostHistory = Invoke-RestMethod "$Origin$($Shared.MessagePath)" -Headers $Shared.Host
+    $hostCursor = Invoke-RestMethod "$Origin$($Shared.MessagePath)?cursor=$($Shared.HostCursor)" -Headers $Shared.Host
+    $search = Invoke-RestMethod "$Origin/v1/partner-links/$($Shared.Link)/search?q=harbor%20recovery" -Headers $Shared.Host
+    if ($hostHistory.grant_epoch -ne $Shared.Epoch -or $hostHistory.items.Count -ne 1 -or $hostHistory.items[0].seq -ne 1 -or
+        $hostCursor.items.Count -ne 0 -or $search.items.Count -ne 1 -or $search.items[0].seq -ne 1) {
+        throw 'Restored shared grants, cursor, content, or searchable tombstone differed'
+    }
+    $oldTimeline = Invoke-WebRequest "$Origin$($Shared.MessagePath)?cursor=$($Shared.OldCursor)" -Headers $Shared.Guest -SkipHttpErrorCheck
+    $guestHeaders = $Shared.Guest.Clone()
+    $guestHeaders['X-Attachment-Token'] = $Shared.OldPass
+    $oldFile = Invoke-WebRequest "$Origin/v1/shared-attachment-content" -Headers $guestHeaders -SkipHttpErrorCheck
+    if ($oldTimeline.StatusCode -ne 404 -or $oldFile.StatusCode -ne 404) { throw 'Restored service allowed stale shared access' }
+    $file = Invoke-RestMethod "$Origin$($Shared.GrantPath)" -Method Post -Headers $Shared.Host
+    $fileHeaders = $Shared.Host.Clone()
+    $fileHeaders['X-Attachment-Token'] = $file.token
+    Invoke-WebRequest "$Origin/v1/shared-attachment-content" -Headers $fileHeaders -OutFile "$fixtureRoot/shared-after.bin"
+    if ((Get-FileHash "$fixtureRoot/shared-after.bin" -Algorithm SHA256).Hash -ne $FileDigest) { throw 'Restored shared attachment digest differs' }
+
+    $export = Invoke-RestMethod "$Origin$($Shared.ExportPath)" -Headers $Shared.Admin
+    $archive = Invoke-RestMethod "$Origin$($Shared.ExportPath)/grant" -Method Post -Headers $Shared.Admin
+    $archiveHeaders = $Shared.Admin.Clone()
+    $archiveHeaders['X-Export-Token'] = $archive.token
+    Invoke-WebRequest "$Origin$($Shared.ExportPath)/content" -Headers $archiveHeaders -OutFile "$fixtureRoot/shared-archive-after.json"
+    if ($export.state -ne 'ready' -or $export.archive_digest -ne $Shared.Digest -or
+        (Get-FileHash "$fixtureRoot/shared-archive-after.json" -Algorithm SHA256).Hash -ne $Shared.Digest) {
+        throw 'Restored organization archive receipt or bytes differed'
+    }
+    $audit = Invoke-RestMethod "$Origin$($Shared.AdminPath)/audit" -Headers $Shared.Admin
+    $next = Invoke-FixtureJson "$Origin$($Shared.MessagePath)" Post $Shared.Host @{ client_id = 'resume-shared'; body = 'next contract' }
+    if ('grant_revoked' -notin $audit.items.action -or 'message_hidden' -notin $audit.items.action -or $next.seq -ne 3) {
+        throw 'Restored shared ledger, audit, or channel next sequence differed'
+    }
+    Write-Output "Shared restore passed: epoch $($Shared.Epoch), next channel seq 3, stale cursor and ticket rejected, archive SHA-256 $($Shared.Digest)."
+}
+
 function Test-FixtureRestore($SourceProcess, $Sender, [string]$AdminToken) {
     $peer = $null
     $recovered = $null
@@ -99,6 +191,7 @@ function Test-FixtureRestore($SourceProcess, $Sender, [string]$AdminToken) {
         $removal = @{ client_id = 'restore-pending'; items = @(@{ user_id = $reader.session.user_id; action = 'remove' }) } | ConvertTo-Json -Depth 5
         $pending = Invoke-RestMethod "$origin$batchPath" -Method Post -ContentType 'application/json' -Headers $senderHeaders -Body $removal
         if ($pending.version -ne 1 -or $pending.items[0].status -ne 'not_started') { throw 'Expected an unstarted group roster receipt' }
+        $shared = New-SharedRestoreFixture $peerOrigin $Sender $AdminToken $attachment.id
 
         Stop-FixtureProcess $SourceProcess
         Stop-FixtureProcess $peer
@@ -148,6 +241,7 @@ function Test-FixtureRestore($SourceProcess, $Sender, [string]$AdminToken) {
             throw 'Restored group roster produced extra changes or failed to resume'
         }
         Write-Output "Two standalone gateways and isolated restore passed: message seq 1, sync/read seq 1, attachment SHA-256 $digest, next write seq 2, partial and unstarted group batches preserved."
+        Test-SharedRestoreFixture $peerOrigin $shared $digest
     } finally {
         Stop-FixtureProcess $recovered
         Stop-FixtureProcess $peer
@@ -213,7 +307,7 @@ GRANT ALL PRIVILEGES ON $dbName.* TO 'messaging_test'@'127.0.0.1';
     if ($PreviousBinary) {
         $oldVersion = & $PreviousBinary migrate | ConvertFrom-Json
         Assert-Exit 'previous migration'
-        if ($oldVersion.schema_version -notin @(5, 6)) { throw 'Expected a previous binary using schema version 5 or 6' }
+        if ($oldVersion.schema_version -notin @(5, 6, 7)) { throw 'Expected a previous binary using schema version 5, 6, or 7' }
         $oldApp = & $PreviousBinary create-app upgrade dispatch | ConvertFrom-Json
         Assert-Exit 'previous application bootstrap'
         $appProcess = Start-Process -FilePath $PreviousBinary -ArgumentList 'serve' -PassThru -WindowStyle Hidden -RedirectStandardError "$fixtureRoot/previous.log"
@@ -231,6 +325,17 @@ GRANT ALL PRIVILEGES ON $dbName.* TO 'messaging_test'@'127.0.0.1';
         $oldGroup = Invoke-RestMethod "$origin/v1/conversations/group" -Method Post -Headers $senderHeaders -ContentType 'application/json' -Body '{"title":"Legacy roster","history_policy":"since_join"}'
         $oldGroupPath = "$origin/v1/conversations/$($oldGroup.id)"
         Invoke-RestMethod "$oldGroupPath/members/$($oldRecipient.session.user_id)" -Method Put -Headers $senderHeaders -ContentType 'application/json' -Body '{"role":"member"}' | Out-Null
+        $oldAuditItems = @()
+        if ($oldVersion.schema_version -ge 7) {
+            $oldAuditItems = (Invoke-RestMethod "$oldGroupPath/membership-operations" -Headers $senderHeaders).items
+            if ($oldAuditItems.Count -ne 1) { throw 'Previous service did not record its group operation' }
+            $preflightBefore = & $binary shared-preflight upgrade | ConvertFrom-Json
+            Assert-Exit 'legacy shared preflight'
+            if ($preflightBefore.schema_version -ne 7 -or $preflightBefore.ordinary_groups -ne 1 -or
+                $preflightBefore.ordinary_group_memberships -ne 2 -or $preflightBefore.owner_conflict_group_ids.Count -ne 0) {
+                throw 'Legacy shared preflight inventory differs'
+            }
+        }
         Stop-Process -Id $appProcess.Id
         $appProcess.WaitForExit(5000) | Out-Null
         if (!$appProcess.HasExited) { throw 'Previous service did not stop' }
@@ -257,9 +362,12 @@ GRANT ALL PRIVILEGES ON $dbName.* TO 'messaging_test'@'127.0.0.1';
     $me = Invoke-RestMethod "$origin/v1/me" -Headers @{ Authorization = 'Bearer ' + $session.token }
     if (!$me.user_id -or $me.user_id -ne $session.session.user_id -or $me.device_key -ne 'desk') { throw 'Live credential readback mismatch' }
     if ($PreviousBinary) {
+        $oldAdminHeaders = @{ Authorization = 'Bearer ' + $oldApp.admin_token }
+        $off = Invoke-WebRequest "$origin/v1/admin/shared-spaces" -Headers $oldAdminHeaders -SkipHttpErrorCheck
+        if ($off.StatusCode -ne 404) { throw 'Upgraded tenant shared entry point must require opt-in' }
         $timeline = Invoke-RestMethod "$origin/v1/admin/conversations/$($oldChat.id)/messages/1/delivery" -Headers @{ Authorization = 'Bearer ' + $oldApp.admin_token }
         if ($timeline.seq -ne 1 -or ($oldVersion.schema_version -eq 5 -and ($timeline.live_delivery -ne $false -or $timeline.dispatched_at)) -or
-            ($oldVersion.schema_version -eq 6 -and $timeline.live_delivery -ne $true)) { throw 'Previous message delivery metadata differs after upgrade' }
+            ($oldVersion.schema_version -ge 6 -and $timeline.live_delivery -ne $true)) { throw 'Previous message delivery metadata differs after upgrade' }
         $replayed = Invoke-RestMethod "$oldPath/messages" -Method Post -Headers $senderHeaders -ContentType 'application/json' -Body $oldPayload
         if (!$replayed.duplicate -or $replayed.message.seq -ne 1) { throw 'Previous idempotency key failed after upgrade' }
         $newPayload = @{ client_id = 'after-upgrade'; body = 'second dispatch' } | ConvertTo-Json
@@ -270,10 +378,24 @@ GRANT ALL PRIVILEGES ON $dbName.* TO 'messaging_test'@'127.0.0.1';
         }
         $legacyMembers = Invoke-RestMethod "$oldGroupPath/members" -Headers $recipientHeaders
         $legacyAudit = Invoke-RestMethod "$oldGroupPath/membership-operations" -Headers $senderHeaders
-        if ($legacyMembers.items.Count -ne 2 -or $legacyAudit.items.Count -ne 0) { throw 'Historical memberships were lost or synthetic audit was produced during upgrade' }
+        if ($legacyMembers.items.Count -ne 2 -or $legacyAudit.items.Count -ne $oldAuditItems.Count -or
+            ($oldAuditItems.Count -gt 0 -and ($legacyAudit.items[0] | ConvertTo-Json -Depth 6 -Compress) -ne ($oldAuditItems[0] | ConvertTo-Json -Depth 6 -Compress))) {
+            throw 'Historical memberships or audit entries changed during upgrade'
+        }
+        $preflightAfter = & $binary shared-preflight upgrade | ConvertFrom-Json
+        Assert-Exit 'upgraded shared preflight'
+        if ($oldVersion.schema_version -ge 7 -and ($preflightAfter.ordinary_groups -ne $preflightBefore.ordinary_groups -or
+            $preflightAfter.ordinary_group_messages -ne $preflightBefore.ordinary_group_messages -or
+            $preflightAfter.ordinary_group_memberships -ne $preflightBefore.ordinary_group_memberships)) {
+            throw 'Upgrade changed the ordinary group inventory'
+        }
+        $enabled = & $binary set-tenant-shared upgrade on | ConvertFrom-Json
+        Assert-Exit 'enable shared for upgraded tenant'
+        $spaces = Invoke-RestMethod "$origin/v1/admin/shared-spaces" -Headers $oldAdminHeaders
+        if (!$enabled.shared_enabled -or $spaces.items.Count -ne 0) { throw 'Pilot opt-in did not produce an empty shared directory' }
         Invoke-RestMethod "$oldGroupPath/members/$($oldRecipient.session.user_id)" -Method Put -Headers $senderHeaders -ContentType 'application/json' -Body '{"role":"admin"}' | Out-Null
         $newAudit = Invoke-RestMethod "$oldGroupPath/membership-operations" -Headers $senderHeaders
-        if ($newAudit.items.Count -ne 1 -or $newAudit.items[0].actor_id -ne $oldSender.session.user_id -or $newAudit.items[0].items[0].role -ne 'admin') {
+        if ($newAudit.items.Count -ne ($oldAuditItems.Count + 1) -or $newAudit.items[0].actor_id -ne $oldSender.session.user_id -or $newAudit.items[0].items[0].role -ne 'admin') {
             throw 'New operation on a historical group was not audited'
         }
         Write-Output "Schema $($oldVersion.schema_version) to $($migrated.schema_version) preserved the original session, message, idempotency key, next sequence, and historical group memberships."

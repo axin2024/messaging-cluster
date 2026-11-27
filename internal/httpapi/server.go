@@ -39,6 +39,36 @@ func New(storage *store.Store, cluster *gateway.Gateway, blobs media.Blobs, logg
 	routes.HandleFunc("GET /healthz", s.health)
 	routes.HandleFunc("GET /readyz", s.ready)
 	routes.HandleFunc("POST /v1/admin/users", s.createUser)
+	routes.HandleFunc("POST /v1/admin/shared-spaces", s.createSharedSpace)
+	routes.HandleFunc("GET /v1/admin/shared-spaces", s.adminSharedSpaces)
+	routes.HandleFunc("GET /v1/admin/partner-links", s.adminProjectLinks)
+	routes.HandleFunc("GET /v1/shared-projects", s.memberProjectLinks)
+	routes.HandleFunc("GET /v1/admin/partner-invitations", s.incomingInvitations)
+	routes.HandleFunc("PUT /v1/admin/partner-links/{link}/state", s.changePartnerState)
+	routes.HandleFunc("GET /v1/admin/partner-links/{link}/audit", s.sharedAudit)
+	routes.HandleFunc("POST /v1/admin/partner-links/{link}/exports", s.createSharedExport)
+	routes.HandleFunc("GET /v1/admin/partner-links/{link}/export-preview", s.previewSharedExport)
+	routes.HandleFunc("GET /v1/admin/partner-links/{link}/exports/{export}", s.exportRoute(s.sharedExportStatus))
+	routes.HandleFunc("POST /v1/admin/partner-links/{link}/exports/{export}/retry", s.exportRoute(s.retrySharedExport))
+	routes.HandleFunc("POST /v1/admin/partner-links/{link}/exports/{export}/grant", s.exportRoute(s.sharedExportPass))
+	routes.HandleFunc("GET /v1/admin/partner-links/{link}/exports/{export}/content", s.exportRoute(s.sharedExportContent))
+	routes.HandleFunc("POST /v1/admin/partner-links/{link}/grants", s.changeSharedGrant)
+	routes.HandleFunc("GET /v1/admin/partner-links/{link}/grants", s.adminSharedGrants)
+	routes.HandleFunc("POST /v1/admin/partner-links/{link}/channels", s.createSharedChannel)
+	routes.HandleFunc("GET /v1/partner-links/{link}/channels", s.sharedChannels)
+	routes.HandleFunc("POST /v1/shared-channels/{channel}/messages", s.sendSharedMessage)
+	routes.HandleFunc("POST /v1/shared-channels/{channel}/publications", s.publishLegacyMessage)
+	routes.HandleFunc("GET /v1/shared-channels/{channel}/publication-preview", s.previewLegacyPublication)
+	routes.HandleFunc("GET /v1/shared-channels/{channel}/mention-candidates", s.sharedMentionCandidates)
+	routes.HandleFunc("GET /v1/shared-channels/{channel}/mentions", s.sharedMentions)
+	routes.HandleFunc("GET /v1/shared-channels/{channel}/messages", s.sharedTimeline)
+	routes.HandleFunc("GET /v1/shared-channels/{channel}/threads/{root}", s.sharedTimeline)
+	routes.HandleFunc("POST /v1/shared-channels/{channel}/messages/{seq}/attachments/{attachment}/grant", s.sharedFileGrant)
+	routes.HandleFunc("GET /v1/shared-attachment-content", s.sharedFileContent)
+	routes.HandleFunc("GET /v1/partner-links/{link}/search", s.searchSharedMessages)
+	routes.HandleFunc("DELETE /v1/admin/partner-links/{link}/channels/{channel}/messages/{seq}", s.hideSharedMessage)
+	routes.HandleFunc("POST /v1/admin/shared-spaces/{space}/invitations", s.invitePartner)
+	routes.HandleFunc("POST /shared-spaces/{space}/partners/{org}/accept", s.acceptPartner)
 	routes.HandleFunc("POST /v1/sessions", s.login)
 	routes.HandleFunc("GET /v1/me", s.me)
 	routes.HandleFunc("GET /v1/devices", s.listDevices)
@@ -207,6 +237,16 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		problem(w, http.StatusForbidden, "forbidden")
 	case errors.Is(err, store.ErrHistoryExpired):
 		problem(w, http.StatusGone, "history_expired")
+	case errors.Is(err, store.ErrInvitationExpired):
+		problem(w, http.StatusGone, "invitation_expired")
+	case errors.Is(err, store.ErrSharedCursor):
+		problem(w, http.StatusConflict, "refresh_shared_cursor")
+	case errors.Is(err, store.ErrExportRange):
+		problem(w, http.StatusUnprocessableEntity, "invalid_export_range")
+	case errors.Is(err, store.ErrNoShareableText):
+		problem(w, http.StatusUnprocessableEntity, "source_has_no_text")
+	case errors.Is(err, store.ErrMentionUnavailable):
+		problem(w, http.StatusUnprocessableEntity, "mention_recipient_unavailable")
 	case errors.Is(err, store.ErrInvalidAttachment):
 		problem(w, http.StatusUnprocessableEntity, "attachment_unavailable")
 	case errors.Is(err, store.ErrRateLimited):

@@ -31,7 +31,7 @@ func main() {
 
 func run(args []string, logger *slog.Logger) error {
 	if len(args) == 0 || (len(args) == 1 && (args[0] == "-h" || args[0] == "--help")) {
-		fmt.Fprintln(os.Stdout, "Usage: messaging migrate | create-app TENANT APP | set-tenant-rate TENANT PER_SECOND | serve")
+		fmt.Fprintln(os.Stdout, "Usage: messaging migrate | create-app TENANT APP | set-tenant-rate TENANT PER_SECOND | shared-preflight TENANT | set-tenant-shared TENANT on|off | serve")
 		return nil
 	}
 	dsn := os.Getenv("MESSAGING_MYSQL_DSN")
@@ -59,6 +59,27 @@ func run(args []string, logger *slog.Logger) error {
 			return errors.New("limit must be between 1 and 10000 messages per second")
 		}
 		return setTenantRate(dsn, args[1], rate)
+	case "shared-preflight":
+		if len(args) != 2 || !credential.ValidKey(args[1]) {
+			return errors.New("usage: messaging shared-preflight TENANT")
+		}
+		storage, err := store.Open(dsn)
+		if err != nil {
+			return err
+		}
+		defer storage.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		report, err := storage.SharedPreflight(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(report)
+	case "set-tenant-shared":
+		if len(args) != 3 || !credential.ValidKey(args[1]) || (args[2] != "on" && args[2] != "off") {
+			return errors.New("usage: messaging set-tenant-shared TENANT on|off")
+		}
+		return setTenantShared(dsn, args[1], args[2] == "on")
 	case "serve":
 		if len(args) != 1 {
 			return errors.New("usage: messaging serve")
@@ -67,6 +88,23 @@ func run(args []string, logger *slog.Logger) error {
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+func setTenantShared(dsn, tenant string, enabled bool) error {
+	storage, err := store.Open(dsn)
+	if err != nil {
+		return err
+	}
+	defer storage.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err = storage.Ready(ctx); err != nil {
+		return err
+	}
+	if err = storage.SetTenantShared(ctx, tenant, enabled); err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"tenant": tenant, "shared_enabled": enabled})
 }
 
 func setTenantRate(dsn, tenant string, limit int) error {
